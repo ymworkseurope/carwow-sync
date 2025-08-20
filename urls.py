@@ -1,8 +1,7 @@
-# urls.py
 import requests, lxml.etree as ET, re, json, pathlib, datetime as dt
-
 SITEMAP = "https://www.carwow.co.uk/sitemap.xml"
 OUT     = pathlib.Path("data/url_index.json")
+OUT.parent.mkdir(parents=True, exist_ok=True)
 
 def main():
     xml  = ET.fromstring(requests.get(SITEMAP, timeout=20).content)
