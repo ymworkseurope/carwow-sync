@@ -1,0 +1,21 @@
+name: Daily Carwow Sync
+on:
+  schedule: [cron: '0 1 * * *']   # 毎日 01:00 UTC
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      DEEPL_KEY:    ${{ secrets.DEEPL_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r requirements.txt
+      - name: Run crawler & upsert
+        run: |
+          python urls.py
+          python main.py
