@@ -21,6 +21,8 @@ jobs:
       SUPABASE_URL : ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY : ${{ secrets.SUPABASE_KEY }}
       DEEPL_KEY    : ${{ secrets.DEEPL_KEY }}
+      GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
+  　　GS_SHEET_ID  : ${{ secrets.GS_SHEET_ID }}
       # ※ GS_CREDS_JSON はファイルに書き出すので env には入れない
     steps:
       # ───────────────────────────────────────────── checkout
