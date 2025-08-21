@@ -6,3 +6,4 @@ backoff
 tqdm
 gspread
 google-auth
+google-auth-oauthlib
