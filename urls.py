@@ -1,88 +1,57 @@
 """
-urls.py – carwow モデルページ URL 一覧を生成
-------------------------------------------------
-* https://www.carwow.co.uk/sitemap.xml から再帰的に子サイトマップを取得
-* /make/model 形式 (例: /tesla/model-3) だけ抽出
-* LP や広告 (used-cars-, sell-my-car- など) は除外
-最終結果は変数 OUT (list[str]) に格納される
+urls.py  –  Carwow 全モデル URL 一覧を生成
+rev: 2025-08-22 T23:20Z
+-------------------------------------------
+OUT という list[str] をモジュール import だけで得られる設計
 """
 
-import re, gzip, io, requests, xml.etree.ElementTree as ET
-from typing import Generator, List
+from __future__ import annotations
+import gzip, re, requests, xml.etree.ElementTree as ET
+from typing import Iterator, List
 
 INDEX_URL = "https://www.carwow.co.uk/sitemap.xml"
-HEADERS   = {
-    "User-Agent": "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync)",
-    "Accept-Encoding": "gzip,deflate",
-}
+UA        = ("Mozilla/5.0 (+https://github.com/ymworkseurope/"
+             "carwow-sync 2025-08-22)")
+HEAD      = {"User-Agent": UA}
 
-# ────────────────────────────────────────
+# ---------- low-level ---------- #
 def _fetch_xml(url: str) -> ET.Element:
-    """GET → (gzip 対応) → ElementTree"""
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    """url ⇒ bytes ⇒ (必要なら gunzip) ⇒ ElementTree root"""
+    r = requests.get(url, headers=HEAD, timeout=30)
     r.raise_for_status()
 
-    data = (
-        gzip.decompress(r.content)
-        if (r.headers.get("Content-Encoding") == "gzip" or url.endswith(".gz"))
-        else r.content
-    )
-    # Carwow の XML は xmlns を持つのでワイルドカードで OK
-    return ET.fromstring(data)
+    raw = r.content
+    if r.headers.get("Content-Encoding") == "gzip" or url.endswith(".gz"):
+        raw = gzip.decompress(raw)
 
-# ────────────────────────────────────────
-def _iter_child_sitemaps(index_url: str) -> Generator[str, None, None]:
-    """インデックス XML から <loc> を列挙"""
+    return ET.fromstring(raw)
+
+def _iter_child_sitemaps(index_url: str) -> Iterator[str]:
     root = _fetch_xml(index_url)
-    for sm in root.findall(".//{*}sitemap"):
-        loc = sm.find("{*}loc")
-        if loc is not None and loc.text:
-            yield loc.text.strip()
-
-# ────────────────────────────────────────
-_RE_MODEL   = re.compile(r"^/([\w-]+)/([\w-]+)/?$")
-_SKIP_TOKENS = (
-    "sell-my", "used-", "lease", "deals", "review", "news", "vs", "best-",
-    "-cheap", "-automatic", "-manual", "-black", "-blue", "-red", "-green",
-)
-
-def _iter_model_urls(sitemap_url: str) -> Generator[str, None, None]:
-    """子サイトマップから /make/model だけ抽出"""
-    root = _fetch_xml(sitemap_url)
-    for url_tag in root.findall(".//{*}url"):
-        loc = url_tag.find("{*}loc")
-        if loc is None or not loc.text:
-            continue
+    for loc in root.iterfind(".//{*}loc"):
         url = loc.text.strip()
-        # ドメインを取り除いたパスだけで判定
-        path = re.sub(r"^https?://www\.carwow\.co\.uk", "", url)
-        if (
-            _RE_MODEL.match(path) and
-            not any(tok in path for tok in _SKIP_TOKENS)
-        ):
+        if url.endswith((".xml", ".xml.gz")) and "sitemap" in url and "prismic" not in url:
             yield url
 
-# ────────────────────────────────────────
+def _iter_model_loc(xml_root: ET.Element) -> Iterator[str]:
+    for loc in xml_root.iterfind(".//{*}loc"):
+        url = loc.text.strip()
+        # https://www.carwow.co.uk/{make}/{model}
+        if re.fullmatch(r"https://www\.carwow\.co\.uk/[a-z0-9-]+/[a-z0-9-]+/?", url):
+            yield url
+
+# ---------- public ---------- #
 def _build_out() -> List[str]:
-    out, seen = [], set()
-
+    models: list[str] = []
     for sm_url in _iter_child_sitemaps(INDEX_URL):
-        # モデルページが入っているのは prismic_pages 系だけ
-        if "prismic_pages" not in sm_url:
-            continue
-        for model_url in _iter_model_urls(sm_url):
-            slug = "/".join(model_url.rstrip("/").split("/")[-2:])
-            if slug not in seen:
-                seen.add(slug)
-                out.append(model_url)
+        root = _fetch_xml(sm_url)
+        models.extend(_iter_model_loc(root))
+    return sorted(set(models))
 
-    return sorted(out)
+# 実行時にすぐ使えるリスト
+OUT: List[str] = _build_out()
 
-# このリストを main.py / scrape.py が import して使う
-OUT = _build_out()
-
-# ────────────────── デバッグ実行 ────────────────
+# ---------- CLI (optional) ---------- #
 if __name__ == "__main__":
-    print(f"Total model pages: {len(OUT)}")
-    for u in OUT[:20]:
-        print("  ", u)
+    print(f"Total models: {len(OUT)}")
+    print("sample 20:", OUT[:20])
