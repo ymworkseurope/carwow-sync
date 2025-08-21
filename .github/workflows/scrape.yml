@@ -1,60 +1,49 @@
-# .github/workflows/scrape.yml
-# ──────────────────────────────────────────────────────────────
-# ❶ 01:00 UTC に毎日回す（日本時間 10:00）
-# ❷ 手動実行 (workflow_dispatch) も可
-# ❸ Supabase / DeepL / Google Sheets 連携用シークレットを環境変数へ
-# ❹ GS_CREDS_JSON をファイル secrets/gs_creds.json に書き出す
-# ❺ python scrape.py ─→  Supabase ＆ Google Sheets へ UPSERT
-# ❻ raw.jsonl をジョブ artefact として保存（任意で確認できるように）
-# ──────────────────────────────────────────────────────────────
 name: Daily Carwow Sync
 
 on:
   schedule:
-    - cron: '0 1 * * *'        # 毎日 01:00 UTC
-  workflow_dispatch:           # 手動トリガ
+    - cron: '0 1 * * *'          # 毎日 01:00 UTC（JST 10:00）
+  workflow_dispatch:             # 手動実行
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
+    # ─── ここに “正しい” ENV を揃える ─────────────────────────
     env:
-      SUPABASE_URL : ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY : ${{ secrets.SUPABASE_KEY }}
-      DEEPL_KEY    : ${{ secrets.DEEPL_KEY }}
-      GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
-  　　GS_SHEET_ID  : ${{ secrets.GS_SHEET_ID }}
-      # ※ GS_CREDS_JSON はファイルに書き出すので env には入れない
+      SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
+      DEEPL_KEY:     ${{ secrets.DEEPL_KEY }}
+      GS_SHEET_ID:   ${{ secrets.GS_SHEET_ID }}   # ← ★名称統一
+      GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }} # echo でファイル化用
+    # ────────────────────────────────────────────────────────
+
     steps:
-      # ───────────────────────────────────────────── checkout
       - uses: actions/checkout@v4
 
-      # ───────────────────────────────────────────── Python - 3.11
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ───────────────────────────────────────────── pip install
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ───────────────────────────────────────────── write G-Sheet creds
-      - name: Write Google service-account key (if supplied)
-        if: ${{ secrets.GS_CREDS_JSON != '' }}
+      - name: Write Google service-account key
+        if: env.GS_CREDS_JSON != ''
         run: |
           mkdir -p secrets
-          echo "${{ secrets.GS_CREDS_JSON }}" > secrets/gs_creds.json
+          echo "$GS_CREDS_JSON" > secrets/gs_creds.json
 
-      # ───────────────────────────────────────────── run scraper
-      - name: Run crawler & upsert
+      - name: Run crawler → Supabase & Google Sheets
         run: |
-          python scrape.py
+          python scrape.py            # すべて内部で実行
 
-      # ───────────────────────────────────────────── keep artefact
-      - name: Upload raw dump
-        if: always()                     # エラー時でも残す
+      - name: Upload raw dump (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: raw-jsonl
           path: raw.jsonl
+
