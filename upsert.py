@@ -1,45 +1,68 @@
 # upsert.py
-# rev: 2025-08-23 T10:30Z
+# rev: 2025-08-23 T23:40Z  ←★時刻だけ更新
+
 """
-環境変数
----------
-GS_CREDS      = secrets/gs_creds.json のパス
-GS_SHEET_NAME = 1ZQjMIcIK7xIqra9Uu1ZAR170ekeMQdPsZW46Ts8UExE
+期待する環境変数
+----------------
+GS_CREDS_JSON   : サービスアカウントの JSON そのまま（長い 1 行）
+GS_SHEET_ID     : 1aBcDeFGhiJkLmnO-pQRsTuVWXYZ_1234567890  ← スプレッドシート ID
 """
-import os, csv, gspread
+
+import os, json, io, gspread
 from google.oauth2.service_account import Credentials
 
-CREDS_FILE = os.getenv("GS_CREDS","secrets/gs_creds.json")
-SHEET_NAME = os.getenv("GS_SHEET_NAME","carwow_specs")
+# ── ① JSON を secrets/gs_creds.json に書き出す ───────────────────
+CREDS_PATH = "secrets/gs_creds.json"
+os.makedirs("secrets", exist_ok=True)
 
-scope=[
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/drive"
+# GitHub Actions では env に載ってくるのでファイルに落とす
+if os.getenv("GS_CREDS_JSON") and not os.path.exists(CREDS_PATH):
+    with open(CREDS_PATH, "w", encoding="utf-8") as f:
+        f.write(os.getenv("GS_CREDS_JSON"))
+
+# ── ② 認証 ────────────────────────────────────────────────
+SCOPE = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
-creds = Credentials.from_service_account_file(CREDS_FILE,scopes=scope)
-gc = gspread.authorize(creds)
-ws = gc.open(SHEET_NAME).sheet1   # 1枚目のシート
+creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPE)
+gc    = gspread.authorize(creds)
 
-def _header_map()->dict:
+# ── ③ シートを ID で開く（※ open_by_key!）────────────────────
+SHEET_ID = os.getenv("GS_SHEET_ID")
+ws       = gc.open_by_key(SHEET_ID).sheet1      # 1 枚目のタブ
+
+# -----------------------------------------------------------------
+def _header_map() -> dict:
     """列名→列番号 dict（1-origin）"""
-    return {v:i+1 for i,v in enumerate(ws.row_values(1))}
+    return {v: i + 1 for i, v in enumerate(ws.row_values(1))}
 
 def upsert(row: dict):
-    header=_header_map()
-    slug_col=header.get("slug")
-    if not slug_col:               # 初回だけヘッダを作る
-        ws.insert_row(list(row.keys()),1)
-        header=_header_map(); slug_col=header["slug"]
+    header = _header_map()
+    slug_col = header.get("slug")
 
-    cell=ws.find(row["slug"]) if slug_col else None
-    if cell:                       # 更新
-        for k,v in row.items():
+    # 1 行目（ヘッダ）が無ければ作成
+    if not slug_col:
+        ws.insert_row(list(row.keys()), 1)
+        header = _header_map()
+        slug_col = header["slug"]
+
+    # 既存行を検索
+    cell = ws.find(row["slug"]) if slug_col else None
+    if cell:
+        # 更新
+        for k, v in row.items():
             ws.update_cell(cell.row, header[k], v if v is not None else "")
-    else:                          # 追加
-        ws.append_row([row.get(h,"") for h in header.keys()], value_input_option="USER_ENTERED")
+    else:
+        # 追加
+        ws.append_row(
+            [row.get(h, "") for h in header.keys()],
+            value_input_option="USER_ENTERED"
+        )
 
-if __name__=="__main__":
-    import sys, json
-    with open(sys.argv[1],"r",encoding="utf-8") as f:
-        for j in f: upsert(json.loads(j))
-    print("DONE → Google Sheet:", SHEET_NAME)
+if __name__ == "__main__":
+    import sys
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        for j in f:
+            upsert(json.loads(j))
+    print("DONE → Google Sheet:", SHEET_ID)
