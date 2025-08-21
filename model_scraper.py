@@ -1,100 +1,69 @@
-"""
-model_scraper.py – 各モデルページから主要スペックを取得
-   * Model名
-   * Body type
-   * Available fuel types
-   * DeepL 翻訳 (任意)
-
-使い方:
-    $ python model_scraper.py https://www.carwow.co.uk/skoda/octavia-estate
-
-環境変数:
-    DEEPL_AUTH_KEY = <DeepL API キー>  (未設定なら翻訳スキップ)
-"""
-
-from __future__ import annotations
-import os, re, sys, json, requests
-from bs4 import BeautifulSoup
-from typing import Dict, Optional, Tuple
+# model_scraper.py
+# rev: 2025-08-23 T10:30Z
+import re, json, time, random, requests, bs4
+from urllib.parse import urljoin
+from slugify import slugify
+from typing import Dict, List
 
 UA = ("Mozilla/5.0 (+https://github.com/ymworkseurope/"
       "carwow-sync 2025-08-23)")
 HEAD = {"User-Agent": UA}
 
-# ────────── HTML パース ──────────
-_KEYS = {
-    "model": re.compile(r"\bmodel\b", re.I),
-    "body_type": re.compile(r"\bbody\s*type\b", re.I),
-    "fuel": re.compile(r"\bavailable\s*fuel\s*types?\b", re.I),
-}
-
-def parse_spec(html: str) -> Tuple[str, str, str]:
-    """
-    ページ HTML から (model, body_type, fuel) を返す。
-    見つからなければ空文字。
-    """
-    soup = BeautifulSoup(html, "lxml")
-    mdl = bod = ful = ""
-
-    root = soup.select_one("div.review-overview__at-a-glance-model")
-    if not root:
-        return mdl, bod, ful
-
-    # div → div のペアで (heading, value)
-    divs = root.find_all("div", recursive=False)
-    for i in range(0, len(divs) - 1, 2):
-        head = divs[i].get_text(strip=True)
-        val  = divs[i + 1].get_text(" ", strip=True)
-        if _KEYS["model"].search(head):
-            mdl = val
-        elif _KEYS["body_type"].search(head):
-            bod = val
-        elif _KEYS["fuel"].search(head):
-            ful = val
-    return mdl, bod, ful
-
-
-# ────────── DeepL 翻訳 ──────────
-DEEPL_KEY = os.getenv("DEEPL_AUTH_KEY")
-
-def deepl_translate(text: str, target_lang="JA") -> str:
-    if not text or not DEEPL_KEY:
-        return ""
-    url = "https://api-free.deepl.com/v2/translate"
-    payload = {
-        "auth_key": DEEPL_KEY,
-        "text": text,
-        "target_lang": target_lang,
-    }
-    try:
-        r = requests.post(url, data=payload, timeout=15)
-        r.raise_for_status()
-        return r.json()["translations"][0]["text"]
-    except Exception as e:
-        sys.stderr.write(f"[WARN] DeepL failed: {e}\n")
-        return ""
-
-
-# ────────── 単一ページ処理 ──────────
-def scrape(url: str) -> Dict[str, str]:
-    r = requests.get(url, headers=HEAD, timeout=30)
+def _get(url: str, **kw) -> requests.Response:
+    r = requests.get(url, headers=HEAD, timeout=30, **kw)
     r.raise_for_status()
-    mdl, bod, ful = parse_spec(r.text)
+    return r
+
+def _bs(url: str):
+    return bs4.BeautifulSoup(_get(url).text, "lxml")
+
+def _sleep():
+    time.sleep(random.uniform(0.6, 1.1))
+
+def _clean_imgs(s, base: str, limit=12) -> List[str]:
+    out=[]
+    for img in s.select("img[src]"):
+        src=img["src"]
+        if any(k in src.lower() for k in ("logo","icon","badge","sprite","favicon")):
+            continue
+        full=urljoin(base,src)
+        if full.startswith("http") and full not in out:
+            out.append(full)
+        if len(out)>=limit:
+            break
+    return out
+
+def scrape(url: str) -> Dict:
+    """https://www.carwow.co.uk/skoda/octavia-estate → 仕様・画像 etc."""
+    top=_bs(url)
+    _sleep()
+    # -- 「Overview」の見出しブロックが必ず 1 個だけあるのでそこを anchor にする
+    title = top.select_one("h1").get_text(" ", strip=True)
+    price_txt = top.get_text(" ", strip=True)
+    price_m = re.search(r"£([\d,]+)\s*[–-]\s*£([\d,]+)", price_txt)
+    pmin,pmax = (int(price_m[1].replace(",","")), int(price_m[2].replace(",",""))) if price_m else (None,None)
+
+    ## ======= Model, Body type, Fuel =======
+    glance = top.select_one(".review-overview__at-a-glance-model")
+    model = body_type = fuel = None
+    if glance:
+        blocks = [b.get_text(strip=True) for b in glance.select("div")]
+        for k,v in zip(blocks[::2],blocks[1::2]):
+            if   k.startswith("Model"):          model = v
+            elif k.startswith("Body type"):      body_type = v
+            elif k.startswith("Available fuel"): fuel = v
+
+    ## ======= 画像 =======
+    media_urls = _clean_imgs(top, url)
 
     return {
-        "url"        : url,
-        "model_en"   : mdl,
-        "model_ja"   : deepl_translate(mdl),
-        "body_type"  : bod,
-        "fuel"       : ful,
+        "slug"          : slugify(url.split("/")[-1]),
+        "url"           : url,
+        "title"         : title,
+        "model_en"      : model or title.split()[-1],
+        "body_type"     : body_type,
+        "fuel"          : fuel,
+        "price_min_gbp" : pmin,
+        "price_max_gbp" : pmax,
+        "media_urls"    : media_urls,
     }
-
-
-# ────────── CLI ──────────
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python model_scraper.py <model-url>")
-        sys.exit(1)
-
-    info = scrape(sys.argv[1])
-    print(json.dumps(info, ensure_ascii=False, indent=2))
