@@ -1,39 +1,37 @@
-# urls.py
-import requests, json, datetime as dt, pathlib, bs4, re
+# urls.py – Carwow “純粋モデル” URL だけをイテレート
+import re, requests, bs4
+from urllib.parse import urlparse
 
-SITEMAP_INDEX = "https://www.carwow.co.uk/sitemap.xml"
-OUT           = pathlib.Path("data/url_index.json")
-OUT.parent.mkdir(parents=True, exist_ok=True)
+HEAD = {"User-Agent": "Mozilla/5.0 (+github.com/your/carwow-sync)"}
 
-XML = lambda url: bs4.BeautifulSoup(requests.get(url, timeout=20).content, "xml")
+# 例: /abarth/500e           → ✅
+#     /sell-my-car-ford      → ❌
+#     /vauxhall/used         → ❌
+MODEL_PATTERN = re.compile(r"^/([a-z0-9\-]+)/([a-z0-9\-]+)$")
 
-# 2 段階：サイトマップ index → 各サブサイトマップ
-def collect_urls():
-    index = XML(SITEMAP_INDEX)
-    submaps = [loc.text for loc in index.find_all("loc")
-               if loc.text.endswith(".xml")]               # *.xml だけを取り出す
+EXCLUDE_WORDS = (
+    "used", "lease", "automatic", "manual",        # 派生・中古
+    "sell-my-car", "valuation", "van-valuation",   # 査定
+    "best-", "most-", "small-cars", "suvs-",       # ランキング
+)
 
-    model_urls, makes = set(), set()
-    rx_model = re.compile(r"^https://www\.carwow\.co\.uk/([^/]+)/([^/.]+)/?$")
+def iter_model_urls():
+    xml = requests.get(
+        "https://www.carwow.co.uk/sitemap/model_pages.xml",
+        headers=HEAD, timeout=30
+    ).text
+    soup = bs4.BeautifulSoup(xml, "xml")
 
-    for sm in submaps:
-        sm_xml = XML(sm)
-        for loc in sm_xml.find_all("loc"):
-            u = loc.text.rstrip('/')
-            m = rx_model.match(u)
-            if m:                                          # make/model 形式だけ
-                model_urls.add(u)
-                makes.add(m.group(1))
+    for loc in soup.select("url > loc"):
+        url = loc.text.strip()
+        path = "/" + "/".join(urlparse(url).path.strip("/").split("/")[:2])
 
-    return sorted(makes), sorted(model_urls)
+        # ① パス形式が /make/model ?
+        if not MODEL_PATTERN.match(path):
+            continue
 
-def main():
-    makes, models = collect_urls()
-    OUT.write_text(json.dumps({
-        "fetched": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "makes"  : makes,
-        "models" : models
-    }, indent=2))
+        # ② NG ワードを含む？ → スキップ
+        if any(w in path for w in EXCLUDE_WORDS):
+            continue
 
-if __name__ == "__main__":
-    main()
+        yield "https://www.carwow.co.uk" + path
