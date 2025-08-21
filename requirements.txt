@@ -4,3 +4,5 @@ lxml
 python-slugify
 backoff
 tqdm
+gspread
+google-auth
