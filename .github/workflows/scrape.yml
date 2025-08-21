@@ -10,12 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     # ─── ここに “正しい” ENV を揃える ─────────────────────────
-    env:
-      SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
-      DEEPL_KEY:     ${{ secrets.DEEPL_KEY }}
-      GS_SHEET_ID:   ${{ secrets.GS_SHEET_ID }}   # ← ★名称統一
-      GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }} # echo でファイル化用
+# .github/workflows/scrape.yml の env
+env:
+  SUPABASE_URL : ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY : ${{ secrets.SUPABASE_KEY }}
+  DEEPL_KEY    : ${{ secrets.DEEPL_KEY }}
+  GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
+  GS_SHEET_ID  : ${{ secrets.GS_SHEET_ID }}   # ← ここに合わせる
     # ────────────────────────────────────────────────────────
 
     steps:
