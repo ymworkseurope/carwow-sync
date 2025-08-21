@@ -1,30 +1,22 @@
 """
 urls.py – Carwow 全モデル URL 一覧を生成
-rev: 2025-08-22 T24:15Z
+rev: 2025-08-23
 -------------------------------------------
-* `OUT : list[str]`       … 全モデル URL（重複なし・昇順）
-* `iter_model_urls()`     … 後方互換イテレータ
-  └─ どちらも import だけで利用できます
+`OUT` という list[str] を import だけで取得できる
 """
 
 from __future__ import annotations
-import gzip
-import re
-import requests
-import xml.etree.ElementTree as ET
+import gzip, re, requests, xml.etree.ElementTree as ET
 from typing import Iterator, List
 
 INDEX_URL = "https://www.carwow.co.uk/sitemap.xml"
-UA = (
-    "Mozilla/5.0 (+https://github.com/ymworkseurope/"
-    "carwow-sync 2025-08-22)"
-)
-HEAD = {"User-Agent": UA}
+UA        = ("Mozilla/5.0 (+https://github.com/ymworkseurope/"
+             "carwow-sync 2025-08-23)")
+HEAD      = {"User-Agent": UA}
 
 # ────────── low-level ──────────
 def _maybe_gunzip(raw: bytes) -> bytes:
-    """gzip で圧縮されていれば解凍して返す"""
-    if raw.startswith(b"\x1f\x8b"):           # gzip magic
+    if raw[:2] == b"\x1f\x8b":           # gzip magic
         try:
             return gzip.decompress(raw)
         except gzip.BadGzipFile:
@@ -40,7 +32,6 @@ def _fetch_xml(url: str) -> ET.Element:
 
 
 def _iter_child_sitemaps(index_url: str) -> Iterator[str]:
-    """トップサイトマップから階層下の .xml/.xml.gz を列挙"""
     root = _fetch_xml(index_url)
     for loc in root.iterfind(".//{*}loc"):
         url = loc.text.strip()
@@ -48,18 +39,24 @@ def _iter_child_sitemaps(index_url: str) -> Iterator[str]:
             yield url
 
 
+# ────────── URL フィルタ ──────────
+# ① make / model の 2 セグメントだけ     例) /bmw/i3
+# ② blog-* / used-cars-* などを除外
+_RE_MODEL = re.compile(
+    r"https://www\.carwow\.co\.uk/"
+    r"(?!blog-|used-"           # ←除外キーワード
+      r"sell-"                  # 将来拡張用
+    r")[a-z0-9-]+/[a-z0-9-]+/?$"
+)
+
 def _iter_model_loc(xml_root: ET.Element) -> Iterator[str]:
-    """子サイトマップから “/make/model” パスだけ抽出"""
-    pat = re.compile(
-        r"https://www\.carwow\.co\.uk/[a-z0-9-]+/[a-z0-9-]+/?\Z"
-    )
     for loc in xml_root.iterfind(".//{*}loc"):
         url = loc.text.strip()
-        if pat.fullmatch(url):
+        if _RE_MODEL.fullmatch(url):
             yield url
 
 
-# ────────── build list ──────────
+# ────────── public ──────────
 def _build_out() -> List[str]:
     models: list[str] = []
     for sm_url in _iter_child_sitemaps(INDEX_URL):
@@ -68,16 +65,16 @@ def _build_out() -> List[str]:
     return sorted(set(models))
 
 
-# ---------- public ----------
+# 既存: OUT は全モデル URL のリスト
 OUT: List[str] = _build_out()
 
-
+# ▼ main.py（旧版）互換イテレータ
 def iter_model_urls() -> Iterator[str]:
-    """旧 main.py 互換：モデル URL を順次 yield"""
+    """yield でモデル URL を順次返す（後方互換）"""
     yield from OUT
 
 
-# ---------- optional CLI ----------
+# ────────── CLI ──────────
 if __name__ == "__main__":
     print(f"Total models = {len(OUT)}")
     print("First 20:", OUT[:20])
