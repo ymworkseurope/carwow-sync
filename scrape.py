@@ -28,18 +28,23 @@ def _sleep():
 
 # ───────── sitemap → /make/model URL 一覧 ──────────
 def iter_model_urls() -> List[str]:
-    xml = _get("https://www.carwow.co.uk/sitemap.xml").text
-    locs = re.findall(r"<loc>(https://[^<]+)</loc>", xml)
-    models: list[str] = []
+    # Carwowのsitemapを取得
+    sitemap_url = "https://www.carwow.co.uk/sitemap.xml"
+    xml = _get(sitemap_url).text
+    
+    # 車両カタログURLを抽出（/make/model 形式）
+    locs = re.findall(r"<loc[](https://www\.carwow\.co\.uk/[^<]+)</loc>", xml)
+    model_urls = []
+    
     for loc in locs:
-        if not loc.endswith(".xml"): continue
-        sub = _get(loc).text
-        models += re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub)
-    return sorted({
-        u for u in models
-        if re.match(r"https://www\.carwow\.co\.uk/[a-z0-9-]+/[a-z0-9-]+/?$", u)
-        and not re.search(r"(blog|used|news)", u)
-    })
+        path = urlparse(loc).path.strip('/')
+        # /make/model 形式かつ不要なパスを除外
+        if (len(path.split('/')) == 2 and
+            all(part for part in path.split('/')) and
+            not re.search(r"(blog|used|news|best|review)", path, re.IGNORECASE)):
+            model_urls.append(loc)
+    
+    return sorted(set(model_urls))  # 重複を除去してソート
 
 # ───────── Supabase UPSERT（改良版） ──────────
 def db_upsert(item: Dict):
