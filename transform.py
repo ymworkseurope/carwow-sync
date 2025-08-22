@@ -1,10 +1,10 @@
 # transform.py
-# rev: 2025-08-24 表記ゆれ対策版
+# rev: 2025-08-24 修正版（slug検証強化）
 """
 raw.jsonl → 変換済み dict を返すユーティリティ
 表記ゆれ対策のためのローカルグロッサリー機能付き
 """
-import os, json, datetime as dt, backoff, requests, slugify
+import os, json, datetime as dt, backoff, requests
 import hashlib
 import re
 
@@ -23,21 +23,6 @@ AUTO_GLOSSARY = {
     "Rolls-Royce": "ロールスロイス",
     "Vauxhall": "ボクスホール",
     "McLaren": "マクラーレン",
-    "Morgan": "モーガン",
-    "TVR": "TVR",
-    "Caterham": "ケータハム",
-    "Westfield": "ウエストフィールド",
-    "Austin": "オースチン",
-    "Marcos": "マーコス",
-    "Triumph": "トライアンフ",
-    "Morris": "モーリス",
-    "Vanden Plas": "バンデンプラ",
-    "Austin Healey": "オースチン ヒーレー",
-    "British Leyland": "ブリティッシュ レイランド",
-    "Wolseley": "ウーズレイ",
-    "Mini Moke": "ミニモーク",
-    "Riley": "ライレー",
-    "Panther Westwinds": "パンサー ウェストウインズ",
     
     # イタリア系メーカー
     "Abarth": "アバルト",
@@ -45,25 +30,11 @@ AUTO_GLOSSARY = {
     "Fiat": "フィアット",
     "Lamborghini": "ランボルギーニ",
     "Maserati": "マセラティ",
-    "Lancia": "ランチア",
     "Ferrari": "フェラーリ",
-    "De Tomaso": "デトマソ",
-    "Autobianchi": "アウトビアンキ",
-    "Innocenti": "イノチェンティ",
-    "Pagani": "パガーニ",
-    "Diatto": "ディアット",
-    "Osca": "オスカ",
-    "Bertone": "ベルトーネ",
-    "Bizzarrini": "ビッザリーニ",
-    "Iso": "イソ",
     
     # その他ヨーロッパ系
-    "KTM X-Bow": "KTM クロスボウ",
-    "Donkervoort": "ドンカーブート",
     "Polestar": "ポールスター",
     "Volvo": "ボルボ",
-    "Saab": "サーブ",
-    "Koenigsegg": "ケーニグセグ",
     "Cupra": "クプラ",
     "SEAT": "セアト",
     "Skoda": "シュコダ",
@@ -77,46 +48,17 @@ AUTO_GLOSSARY = {
     "Porsche": "ポルシェ",
     "Smart": "スマート",
     "Volkswagen": "フォルクスワーゲン",
-    "Opel": "オペル",
-    "BMW Alpina": "BMWアルピナ",
-    "Daimler": "デイムラー",
-    "Brabus": "ブラバス",
-    "Roof": "ルーフ",
-    "Burstner": "バーストナー",
-    "YES!": "イエス",
-    "Artega": "アルデガ",
     "Alpine": "アルピーヌ",
     "Citroen": "シトロエン",
     "DS": "DSオートモビル",
     "Peugeot": "プジョー",
     "Renault": "ルノー",
-    "Venturi": "ヴェンチュリー",
-    "Bugatti": "ブガッティ",
     "Dacia": "ダチア",
-    "Lada": "ラーダ",
-    "UAZ": "ワズ",
-    "Ligier": "リジェ",
-    "Tauro Sport Auto": "タウロスポーツオート",
-    "AMG": "AMG",
-    "Borgward": "ボルクヴァルト",
-    "Irmscher": "イルムシャー",
-    "Maybach": "マイバッハ",
-    "Aixam": "エクサム",
-    "Microcar": "マイクロカー",
-    "Scania": "スカニア",
-    "Irizar": "イリサール",
-    "Spyker": "スパイカーカーズ",
-    "Spykercars": "スパイカーカーズ",
-    "Tatra": "タトラ",
-    "Iveco": "イベコ",
-    "Maxus": "マクサス",
-    "Daimler Truck": "ダイムラー トラック",
     
     # 韓国・アメリカ・その他
     "Hyundai": "ヒュンダイ",
     "Jeep": "ジープ",
     "Kia": "キア",
-    "SsangYong": "サンヨン",
     "Tesla": "テスラ",
     "Genesis": "ジェネシス",
     
@@ -130,13 +72,10 @@ AUTO_GLOSSARY = {
     "Subaru": "スバル",
     "Suzuki": "スズキ",
     "Toyota": "トヨタ",
-    "Isuzu": "いすゞ",
     
     # 車種・技術用語
     "Electric": "電気",
     "Hybrid": "ハイブリッド", 
-    "Mild Hybrid": "マイルドハイブリッド",
-    "Plugin Hybrid": "プラグインハイブリッド",
     "Petrol": "ガソリン",
     "Diesel": "ディーゼル",
     "SUV": "SUV",
@@ -147,140 +86,6 @@ AUTO_GLOSSARY = {
     "Convertible": "コンバーチブル",
     "MPV": "MPV",
     "Crossover": "クロスオーバー",
-    
-    # 仕様・技術用語（Carwowから抽出）
-    "Automatic": "オートマチック",
-    "Manual": "マニュアル",
-    "CVT": "CVT",
-    "DSG": "DSG",
-    "Tiptronic": "ティプトロニック",
-    "Multitronic": "マルチトロニック",
-    "PowerShift": "パワーシフト",
-    
-    # 駆動方式
-    "Front-wheel drive": "前輪駆動",
-    "Rear-wheel drive": "後輪駆動", 
-    "All-wheel drive": "全輪駆動",
-    "Four-wheel drive": "四輪駆動",
-    "AWD": "AWD",
-    "4WD": "4WD",
-    "FWD": "前輪駆動",
-    "RWD": "後輪駆動",
-    
-    # 電気自動車関連
-    "Battery capacity": "バッテリー容量",
-    "kWh": "kWh",
-    "Range": "航続距離",
-    "Charging time": "充電時間",
-    "Fast charging": "急速充電",
-    "DC fast charging": "DC急速充電",
-    "AC charging": "AC充電",
-    "Regenerative braking": "回生ブレーキ",
-    "Electric motor": "電気モーター",
-    "Power output": "出力",
-    "Torque": "トルク",
-    
-    # 寸法・容量
-    "Number of doors": "ドア数",
-    "Number of seats": "定員",
-    "Boot space": "ブートスペース",
-    "Boot capacity": "ブート容量",
-    "Seats up": "シート展開時",
-    "Seats down": "シート格納時",
-    "Turning circle": "回転半径",
-    "Wheelbase": "ホイールベース",
-    "External dimensions": "外形寸法",
-    "Internal dimensions": "内部寸法",
-    "Ground clearance": "最低地上高",
-    
-    # 安全・装備
-    "Airbags": "エアバッグ",
-    "ABS": "ABS",
-    "ESP": "ESP",
-    "Traction control": "トラクションコントロール",
-    "Stability control": "スタビリティコントロール",
-    "Cruise control": "クルーズコントロール",
-    "Adaptive cruise control": "アダプティブクルーズコントロール",
-    "Lane keeping assist": "レーンキープアシスト",
-    "Parking sensors": "パーキングセンサー",
-    "Reversing camera": "バックカメラ",
-    "Blind spot monitoring": "ブラインドスポットモニタリング",
-    "Climate control": "クライメートコントロール",
-    "Air conditioning": "エアコンディショニング",
-    "Heated seats": "シートヒーター",
-    "Keyless entry": "キーレスエントリー",
-    "Keyless start": "キーレススタート",
-    "Push button start": "プッシュボタンスタート",
-    
-    # インフォテインメント
-    "Infotainment system": "インフォテインメントシステム",
-    "Touchscreen": "タッチスクリーン",
-    "Navigation system": "ナビゲーションシステム",
-    "Satellite navigation": "衛星ナビゲーション",
-    "Bluetooth": "ブルートゥース",
-    "USB": "USB",
-    "Apple CarPlay": "Apple CarPlay",
-    "Android Auto": "Android Auto",
-    "Digital instrument cluster": "デジタル・インストゥルメントクラスター",
-    
-    # 性能関連
-    "Horsepower": "馬力",
-    "HP": "馬力",
-    "BHP": "制動馬力",
-    "PS": "PS",
-    "kW": "kW",
-    "Nm": "Nm",
-    "lb-ft": "lb-ft",
-    "Top speed": "最高速度",
-    "0-62mph": "0-100km/h加速",
-    "Acceleration": "加速",
-    "Fuel economy": "燃費",
-    "MPG": "マイル/ガロン",
-    "L/100km": "L/100km",
-    "CO2 emissions": "CO2排出量",
-    "WLTP": "WLTP",
-    "NEDC": "NEDC",
-    
-    # ホイール・タイヤ
-    "Alloy wheels": "アロイホイール",
-    "Steel wheels": "スチールホイール",
-    "Tyre size": "タイヤサイズ",
-    "Run-flat tyres": "ランフラットタイヤ",
-    "Spare wheel": "スペアホイール",
-    
-    # 特別仕様・トリム名
-    "Standard": "標準",
-    "Base": "ベース",
-    "Sport": "スポーツ",
-    "Luxury": "ラグジュアリー",
-    "Premium": "プレミアム",
-    "S-Line": "Sライン",
-    "M-Sport": "Mスポーツ",
-    "AMG": "AMG",
-    "RS": "RS",
-    "GTI": "GTI",
-    "R-Line": "R-Line",
-    "Scorpionissima": "スコルピオニッシマ",
-    "Limited Edition": "限定版",
-    
-    # モデル名（一部）
-    "500e": "500e",
-    "600e": "600e",
-    "i3": "i3",
-    "i4": "i4",
-    "iX": "iX",
-    "EQS": "EQS",
-    "EQE": "EQE",
-    "Model S": "モデルS",
-    "Model 3": "モデル3",
-    "Model X": "モデルX",
-    "Model Y": "モデルY",
-    "e-tron": "e-tron",
-    "ID.3": "ID.3",
-    "ID.4": "ID.4",
-    "EX30": "EX30",
-    "EX40": "EX40",
-    "EX90": "EX90",
 }
 
 # 翻訳キャッシュ（セッション中の重複翻訳を防ぐ）
@@ -300,16 +105,6 @@ def _apply_glossary(text: str, glossary: dict) -> str:
     
     return result
 
-def _preprocess_text(text: str) -> str:
-    """翻訳前の前処理（固有名詞の保護など）"""
-    if not text:
-        return text
-    
-    # ハイフンで繋がった車種名を保護
-    text = re.sub(r'\b([A-Z][a-z]+)-([A-Z][a-z]+)\b', r'\1 \2', text)
-    
-    return text
-
 @backoff.on_exception(backoff.expo, requests.RequestException,
                       max_tries=3, jitter=None)
 def _deepl(text: str, src="EN", tgt="JA") -> str:
@@ -321,9 +116,6 @@ def _deepl(text: str, src="EN", tgt="JA") -> str:
     if cache_key in _translation_cache:
         return _translation_cache[cache_key]
     
-    # グロッサリー適用（翻訳前）
-    processed_text = _preprocess_text(text)
-    
     # DeepL翻訳
     translated = ""
     if DEEPL_KEY:
@@ -332,10 +124,10 @@ def _deepl(text: str, src="EN", tgt="JA") -> str:
                 "https://api-free.deepl.com/v2/translate",
                 data={
                     "auth_key": DEEPL_KEY,
-                    "text": processed_text, 
+                    "text": text, 
                     "source_lang": src, 
                     "target_lang": tgt,
-                    "formality": "default"  # 敬語レベル統一
+                    "formality": "default"
                 },
                 timeout=30
             )
@@ -365,20 +157,35 @@ def _normalize_make_model(text: str) -> str:
     if not text:
         return ""
     
-    # ハイフンをスペースに
-    text = text.replace('-', ' ')
-    # タイトルケースに
-    text = text.title()
-    # 連続スペースを単一スペースに
-    text = re.sub(r'\s+', ' ', text)
+    # 既に正規化済みの場合はそのまま返す
+    text = text.strip()
     
-    return text.strip()
+    return text
+
+def validate_slug_format(slug: str) -> bool:
+    """slugの形式を検証"""
+    if not slug:
+        return False
+    
+    # メーカー名-モデル名の形式をチェック
+    if not re.match(r'^[a-z0-9\-]+-[a-z0-9\-\+]+$', slug):
+        return False
+    
+    # スラッシュが含まれていないことを確認
+    if '/' in slug:
+        return False
+    
+    return True
 
 def to_payload(row: dict) -> dict:
     make   = _normalize_make_model(row.get("make_en", ""))
     model  = _normalize_make_model(row.get("model_en", ""))
     slug   = row.get("slug", "").strip()
     overview_en = row.get("overview_en", "").strip()
+    
+    # slugの検証
+    if not validate_slug_format(slug):
+        raise ValueError(f"Invalid slug format: {slug}")
     
     # IDの生成
     record_id = _generate_id(make, model, slug)
@@ -436,7 +243,7 @@ if __name__ == "__main__":
     else:
         # テスト用
         test_data = {
-            "make_en": "bmw",
+            "make_en": "BMW",
             "model_en": "i3",
             "overview_en": "The BMW i3 is an electric vehicle with innovative design.",
             "slug": "bmw-i3"
