@@ -148,15 +148,16 @@ def validate_supabase_payload(payload: Dict) -> tuple[bool, str]:
         except json.JSONDecodeError as e:
             errors.append(f"Invalid JSON in spec_json: {e}")
     
+    # media_urlsの検証（配列型として）
     media_urls = payload.get("media_urls", [])
-if media_urls is not None:
-    if not isinstance(media_urls, list):
-        errors.append(f"media_urls must be an array, got: {type(media_urls)}")
-    else:
-        # 各URLが文字列かチェック
-        for i, url in enumerate(media_urls):
-            if not isinstance(url, str):
-                errors.append(f"media_urls[{i}] must be a string, got: {type(url)}")
+    if media_urls is not None:
+        if not isinstance(media_urls, list):
+            errors.append(f"media_urls must be an array, got: {type(media_urls)}")
+        else:
+            # 各URLが文字列かチェック
+            for i, url in enumerate(media_urls):
+                if not isinstance(url, str):
+                    errors.append(f"media_urls[{i}] must be a string, got: {type(url)}")
     
     # 文字列長の検証
     string_fields = {
@@ -176,10 +177,10 @@ if media_urls is not None:
         if value and len(str(value)) > max_len:
             errors.append(f"{field} too long ({len(str(value))} > {max_len}): {str(value)[:50]}...")
     
-    # ID形式の検証
+    # ID形式の検証（UUID形式）
     if payload.get("id"):
         if not re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', payload["id"]):
-            errors.append(f"Invalid ID format: {payload['id']}")
+            errors.append(f"Invalid UUID format: {payload['id']}")
     
     return len(errors) == 0, "; ".join(errors)
 
