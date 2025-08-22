@@ -177,7 +177,7 @@ def validate_supabase_payload(payload: Dict) -> tuple[bool, str]:
     
     # ID形式の検証
     if payload.get("id"):
-        if not re.match(r'^[a-f0-9]{12}$', payload["id"]):
+        if not re.match(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', payload["id"]):
             errors.append(f"Invalid ID format: {payload['id']}")
     
     return len(errors) == 0, "; ".join(errors)
