@@ -1,16 +1,17 @@
-# rev: 2025-08-23 T23:55Z
+# scrape.py
+# rev: 2025-08-24 修正版（動的車両カタログ検出対応）
 import os, re, json, sys, time, random, requests, bs4, backoff
 from urllib.parse import urlparse
 from typing import List, Dict
 from tqdm import tqdm
 from model_scraper import scrape as scrape_one
-from transform      import to_payload                 # ← 名称一致
+from transform      import to_payload
 try:
     from gsheets_helper import upsert as gsheets_upsert
 except ImportError:
     gsheets_upsert = None
 
-UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-23)"
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-24)"
 HEAD = {"User-Agent": UA}
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -23,26 +24,97 @@ def _get(url: str) -> requests.Response:
     return r
 
 def _sleep(): 
-    # レート制限を少し厳しくする
     time.sleep(random.uniform(1.5, 3.0))
 
-# ───────── sitemap → /make/model URL 一覧 ──────────
-def iter_model_urls() -> List[str]:
-    xml = _get("https://www.carwow.co.uk/sitemap.xml").text
-    locs = re.findall(r"<loc>(https://[^<]+)</loc>", xml)
-    models: list[str] = []
-    for loc in locs:
-        if not loc.endswith(".xml"): continue
-        sub = _get(loc).text
-        models += re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub)
-    return sorted({
-        u for u in models
-        if re.match(r"https://www\.carwow\.co\.uk/[a-z0-9-]+/[a-z0-9-]+/?$", u)
-        and not re.search(r"(blog|used|news)", u)
-    })
+# 動的メーカー検出のための既知メーカーリスト
+KNOWN_MANUFACTURERS = {
+    'abarth', 'alfa-romeo', 'alpine', 'audi', 'bmw', 'byd', 'citroen', 
+    'cupra', 'ds', 'dacia', 'fiat', 'ford', 'gwm', 'genesis', 'honda', 
+    'hyundai', 'ineos', 'jaecoo', 'jeep', 'kgm-motors', 'kia', 
+    'land-rover', 'leapmotor', 'lexus', 'lotus', 'mg', 'mini', 'mazda', 
+    'mercedes', 'mercedes-benz', 'nissan', 'omoda', 'peugeot', 'polestar', 
+    'renault', 'seat', 'skoda', 'skywell', 'smart', 'subaru', 'suzuki', 
+    'tesla', 'toyota', 'vauxhall', 'volkswagen', 'volvo', 'xpeng'
+}
 
-# ───────── Supabase UPSERT（改良版） ──────────
+# 除外すべきキーワード（より包括的）
+EXCLUDE_KEYWORDS = {
+    'used', 'lease', 'deals', 'cheap', 'economical', 'electric-cars', 
+    'hybrid-cars', '4x4-cars', '7-seater-cars', 'automatic-cars', 'convertible-cars',
+    'estate-cars', 'hatchback-cars', 'sports-cars', 'suvs', 'small-cars',
+    'family-cars', 'first-cars', 'luxury-cars', 'mpvs', 'by-range',
+    'efficient', 'fast', 'safe', 'towing', 'big-boot', 'students',
+    'teenagers', 'nil-deposit', 'motability', 'wav', 'saloon-cars',
+    'supermini', 'coupe', 'petrol', 'diesel', 'manual-cars', 'company-cars',
+    'learner', 'gt-cars', 'hot-hatches', 'medium-sized', 'reliable',
+    'sporty', 'ulez-compliant', 'chinese-cars', 'crossover'
+}
+
+def is_valid_car_catalog_url(url: str) -> bool:
+    """車両カタログURLかどうかを判定"""
+    parsed = urlparse(url)
+    if parsed.netloc != 'www.carwow.co.uk':
+        return False
+    
+    path_parts = parsed.path.strip('/').split('/')
+    
+    # パス長チェック：メーカー名/モデル名の2部構成のみ許可
+    if len(path_parts) != 2:
+        return False
+    
+    manufacturer, model = path_parts
+    
+    # 既知のメーカー名チェック
+    if manufacturer.lower() not in KNOWN_MANUFACTURERS:
+        return False
+    
+    # 除外キーワードチェック
+    full_path = f"{manufacturer}/{model}".lower()
+    for keyword in EXCLUDE_KEYWORDS:
+        if keyword in full_path:
+            return False
+    
+    # モデル名の基本バリデーション
+    if not re.match(r'^[a-zA-Z0-9\-\+]+$', model):
+        return False
+    
+    return True
+
+def iter_model_urls() -> List[str]:
+    """サイトマップから車両カタログURLのみを抽出"""
+    try:
+        # サイトマップインデックス取得
+        xml = _get("https://www.carwow.co.uk/sitemap.xml").text
+        sitemap_urls = re.findall(r"<loc>(https://[^<]+\.xml)</loc>", xml)
+        
+        all_urls = set()
+        
+        # 各サイトマップから車両URL抽出
+        for sitemap_url in sitemap_urls:
+            try:
+                sub_xml = _get(sitemap_url).text
+                urls = re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub_xml)
+                
+                # 車両カタログURLのみフィルタリング
+                for url in urls:
+                    if is_valid_car_catalog_url(url):
+                        all_urls.add(url)
+                        
+            except Exception as e:
+                print(f"サイトマップ {sitemap_url} の処理に失敗: {e}")
+                continue
+        
+        result = sorted(list(all_urls))
+        print(f"有効な車両カタログURL: {len(result)}件")
+        
+        return result
+        
+    except Exception as e:
+        print(f"サイトマップ取得エラー: {e}")
+        return []
+
 def db_upsert(item: Dict):
+    """Supabase UPSERT（改良版）"""
     if not (SUPABASE_URL and SUPABASE_KEY):
         print("SKIP Supabase:", item.get("slug", "unknown"))
         return
@@ -55,7 +127,7 @@ def db_upsert(item: Dict):
             
         # リクエスト送信
         r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/cars",  # on_conflictパラメータを削除
+            f"{SUPABASE_URL}/rest/v1/cars",
             headers={
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -71,7 +143,6 @@ def db_upsert(item: Dict):
             error_detail = r.text
             print(f"SUPABASE ERROR [{r.status_code}] {item['slug']}: {error_detail}")
             
-            # 400エラーの場合、レスポンス内容を詳しく見る
             if r.status_code == 400:
                 try:
                     error_json = r.json()
@@ -85,46 +156,47 @@ def db_upsert(item: Dict):
         
     except requests.exceptions.HTTPError as e:
         print(f"HTTP Error for {item.get('slug', 'unknown')}: {e}")
-        print(f"Response: {e.response.text if hasattr(e, 'response') else 'No response'}")
+        if hasattr(e, 'response'):
+            print(f"Response: {e.response.text}")
         raise
     except Exception as e:
         print(f"Unexpected error for {item.get('slug', 'unknown')}: {e}")
         raise
 
-# ───────── バックアップ用のローカル保存 ──────────
 def save_to_backup(payload: Dict):
     """バックアップ用にローカルファイルに保存"""
     backup_file = "backup_data.jsonl"
     with open(backup_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-# ───────── データ検証 ──────────
 def validate_payload(payload: Dict) -> bool:
-    """ペイロードの基本検証"""
-    required_fields = ["slug"]
+    """ペイロードの基本検証（修正版）"""
+    required_fields = ["slug", "make_en", "model_en"]
     
     for field in required_fields:
         if not payload.get(field):
             print(f"WARNING: 必須フィールド '{field}' がありません")
             return False
     
-    # slugの形式チェック
+    # slugの形式チェック（修正）
     slug = payload.get("slug", "")
-    if not re.match(r"^[a-z0-9-]+/[a-z0-9-]+$", slug):
+    # メーカー名-モデル名の形式であることをチェック
+    if not re.match(r'^[a-z0-9\-]+-[a-z0-9\-\+]+$', slug):
         print(f"WARNING: 無効なslug形式: {slug}")
         return False
     
     return True
 
-# ───────── main（改良版） ──────────
 if __name__ == "__main__":
     urls = iter_model_urls()
     print("Total target models:", len(urls))
-    print("sample 5:", ["/".join(urlparse(u).path.strip("/").split("/")[-2:])
-                        for u in urls[:5]])
+    
+    if urls:
+        print("sample 5:", ["/".join(urlparse(u).path.strip("/").split("/"))
+                            for u in urls[:5]])
     
     # デバッグモード（最初の10件のみ）
-    DEBUG_MODE = True
+    DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
     if DEBUG_MODE:
         urls = urls[:10]
         print(f"DEBUG MODE: 最初の{len(urls)}件のみ処理")
