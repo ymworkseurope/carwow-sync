@@ -1,5 +1,5 @@
 # scrape.py
-# rev: 2025-08-24 デバッグ版（詳細エラー表示+修正）
+# rev: 2025-08-24 色データURL除外強化版
 import os, re, json, sys, time, random, requests, bs4, backoff
 from urllib.parse import urlparse
 from typing import List, Dict
@@ -50,8 +50,95 @@ EXCLUDE_KEYWORDS = {
     'sporty', 'ulez-compliant', 'chinese-cars', 'crossover'
 }
 
+# 車両色の包括的リスト（色データURL除外用）
+CAR_COLORS = {
+    'white', 'black', 'silver', 'grey', 'gray', 'red', 'blue', 'green', 
+    'yellow', 'orange', 'brown', 'purple', 'pink', 'gold', 'bronze',
+    'beige', 'cream', 'ivory', 'pearl', 'metallic', 'matt', 'matte',
+    'gloss', 'satin', 'dark', 'light', 'bright', 'deep', 'pale',
+    'midnight', 'arctic', 'polar', 'crystal', 'diamond', 'platinum',
+    'champagne', 'copper', 'steel', 'anthracite', 'charcoal', 'slate',
+    'navy', 'royal', 'electric', 'lime', 'forest', 'olive', 'burgundy',
+    'maroon', 'crimson', 'scarlet', 'azure', 'cyan', 'turquoise',
+    'emerald', 'jade', 'amber', 'rust', 'copper', 'bronze', 'titanium',
+    'magma', 'volcano', 'storm', 'thunder', 'lightning', 'glacier',
+    'alpine', 'cosmic', 'galaxy', 'stellar', 'lunar', 'solar',
+    'phantom', 'ghost', 'shadow', 'mystic', 'magic', 'elegant',
+    'prestige', 'premium', 'luxury', 'exclusive', 'special', 'limited',
+    # 車種特有の色名
+    'tango', 'flame', 'sunset', 'sunrise', 'twilight', 'dawn',
+    'moondust', 'stardust', 'cosmos', 'nova', 'aurora', 'spectrum'
+}
+
+# モデル名として有効な英数字パターン（色を除外）
+VALID_MODEL_PATTERNS = {
+    r'^\d+[a-z]*$',  # 数字＋英字（例：500e, 3008, i4）
+    r'^[a-z]+\d+',   # 英字＋数字（例：a3, x5, q7）
+    r'^[a-z]+-[a-z]+(?:-[a-z0-9]+)*$',  # ハイフン区切り（例：grand-cherokee）
+    r'^[a-z]+(?:-[a-z0-9]+)*$',  # 一般的なモデル名（例：corolla, prius）
+}
+
+def is_color_based_url(manufacturer: str, model: str) -> bool:
+    """URLが色データかどうかを判定（強化版）"""
+    model_lower = model.lower().replace('-', ' ')
+    
+    # 1. モデル名が色名のみで構成されているかチェック
+    model_words = model_lower.split()
+    if all(word in CAR_COLORS for word in model_words if word):
+        print(f"DETECTED COLOR URL: {manufacturer}/{model} (色名のみで構成)")
+        return True
+    
+    # 2. 色名が50%以上を占める場合
+    color_word_count = sum(1 for word in model_words if word in CAR_COLORS)
+    if len(model_words) > 0 and (color_word_count / len(model_words)) >= 0.5:
+        print(f"DETECTED COLOR URL: {manufacturer}/{model} (色名が50%以上)")
+        return True
+    
+    # 3. 特定の色パターンをチェック
+    color_patterns = [
+        r'^(alpine|arctic|polar|crystal|diamond)-?(white|silver)$',
+        r'^(jet|midnight|deep|dark)-?(black|blue|grey)$',
+        r'^(metallic|pearl|matt|matte|gloss|satin)-.+$',
+        r'^.+-(white|black|silver|grey|red|blue|green)$',
+        r'^(bright|light|dark|deep|pale)-.+$',
+    ]
+    
+    for pattern in color_patterns:
+        if re.match(pattern, model_lower):
+            print(f"DETECTED COLOR URL: {manufacturer}/{model} (パターン: {pattern})")
+            return True
+    
+    return False
+
+def is_valid_model_name(model: str) -> bool:
+    """モデル名が車両モデルとして有効かチェック"""
+    model_clean = model.lower().replace('-', '').replace('+', '')
+    
+    # 1. 有効なパターンとマッチするか
+    for pattern in VALID_MODEL_PATTERNS:
+        if re.match(pattern, model.lower()):
+            return True
+    
+    # 2. 数字が含まれている（車種コードの可能性）
+    if any(c.isdigit() for c in model):
+        return True
+    
+    # 3. 一般的な車種名パターン
+    common_model_words = {
+        'sportback', 'coupe', 'sedan', 'wagon', 'touring', 'avant',
+        'alltrack', 'cross', 'sport', 'line', 'edition', 'plus',
+        'comfort', 'luxury', 'premium', 'ultimate', 'executive',
+        'dynamic', 'elegance', 'design', 'style', 'trend', 'active'
+    }
+    
+    model_words = set(model.lower().replace('-', ' ').split())
+    if model_words & common_model_words:
+        return True
+    
+    return False
+
 def is_valid_car_catalog_url(url: str) -> bool:
-    """車両カタログURLかどうかを判定"""
+    """車両カタログURLかどうかを判定（強化版）"""
     parsed = urlparse(url)
     if parsed.netloc != 'www.carwow.co.uk':
         return False
@@ -68,14 +155,25 @@ def is_valid_car_catalog_url(url: str) -> bool:
     if manufacturer.lower() not in KNOWN_MANUFACTURERS:
         return False
     
+    # 色データURLの除外（最優先チェック）
+    if is_color_based_url(manufacturer, model):
+        return False
+    
     # 除外キーワードチェック
     full_path = f"{manufacturer}/{model}".lower()
     for keyword in EXCLUDE_KEYWORDS:
         if keyword in full_path:
+            print(f"EXCLUDED by keyword '{keyword}': {manufacturer}/{model}")
             return False
     
     # モデル名の基本バリデーション
     if not re.match(r'^[a-zA-Z0-9\-\+]+$', model):
+        print(f"EXCLUDED by regex pattern: {manufacturer}/{model}")
+        return False
+    
+    # モデル名の有効性チェック
+    if not is_valid_model_name(model):
+        print(f"EXCLUDED: Invalid model name pattern: {manufacturer}/{model}")
         return False
     
     return True
@@ -88,6 +186,7 @@ def iter_model_urls() -> List[str]:
         sitemap_urls = re.findall(r"<loc>(https://[^<]+\.xml)</loc>", xml)
         
         all_urls = set()
+        excluded_urls = []
         
         # 各サイトマップから車両URL抽出
         for sitemap_url in sitemap_urls:
@@ -99,6 +198,12 @@ def iter_model_urls() -> List[str]:
                 for url in urls:
                     if is_valid_car_catalog_url(url):
                         all_urls.add(url)
+                    else:
+                        # 除外されたURLの記録（メーカー/モデル形式のみ）
+                        parsed = urlparse(url)
+                        path_parts = parsed.path.strip('/').split('/')
+                        if len(path_parts) == 2 and path_parts[0].lower() in KNOWN_MANUFACTURERS:
+                            excluded_urls.append(f"{path_parts[0]}/{path_parts[1]}")
                         
             except Exception as e:
                 print(f"サイトマップ {sitemap_url} の処理に失敗: {e}")
@@ -106,6 +211,12 @@ def iter_model_urls() -> List[str]:
         
         result = sorted(list(all_urls))
         print(f"有効な車両カタログURL: {len(result)}件")
+        
+        if excluded_urls:
+            print(f"除外されたURL: {len(excluded_urls)}件")
+            print("除外例 (最初の10件):")
+            for excluded in excluded_urls[:10]:
+                print(f"  - {excluded}")
         
         return result
         
@@ -122,6 +233,13 @@ def validate_supabase_payload(payload: Dict) -> tuple[bool, str]:
     for field in required_fields:
         if not payload.get(field):
             errors.append(f"Missing required field: {field}")
+    
+    # slugが色データでないことを再確認
+    slug = payload.get("slug", "")
+    if slug:
+        parts = slug.split("-")
+        if len(parts) >= 2 and is_color_based_url(parts[0], "-".join(parts[1:])):
+            errors.append(f"Slug contains color data: {slug}")
     
     # データ型のチェック
     if payload.get("price_min_gbp") is not None:
@@ -263,6 +381,12 @@ def validate_payload(payload: Dict) -> bool:
     slug = payload.get("slug", "")
     if not re.match(r'^[a-z0-9\-]+-[a-z0-9\-\+]+$', slug):
         print(f"WARNING: 無効なslug形式: {slug}")
+        return False
+    
+    # slugが色データでないことを最終確認
+    parts = slug.split("-")
+    if len(parts) >= 2 and is_color_based_url(parts[0], "-".join(parts[1:])):
+        print(f"WARNING: Color data detected in slug: {slug}")
         return False
     
     return True
