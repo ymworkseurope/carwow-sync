@@ -58,7 +58,7 @@ CAR_COLORS = {
     'gloss', 'satin', 'dark', 'light', 'bright', 'deep', 'pale',
     'midnight', 'arctic', 'polar', 'crystal', 'diamond', 'platinum',
     'champagne', 'copper', 'steel', 'anthracite', 'charcoal', 'slate',
-    'navy', 'royal', 'electric', 'lime', 'forest', 'olive', 'burgundy',
+    'navy', 'royal', 'lime', 'forest', 'olive', 'burgundy',
     'maroon', 'crimson', 'scarlet', 'azure', 'cyan', 'turquoise',
     'emerald', 'jade', 'amber', 'rust', 'copper', 'bronze', 'titanium',
     'magma', 'volcano', 'storm', 'thunder', 'lightning', 'glacier',
