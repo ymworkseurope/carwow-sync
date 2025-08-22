@@ -1,5 +1,5 @@
 # gsheets_helper.py
-# rev: 2025-08-24 T01:10Z
+# rev: 2025-08-24 T01:10Z (修正版)
 """
 Google Sheets 連携ユーティリティ
 ────────────────────────────────────────
@@ -26,16 +26,16 @@ _HEADERS = [
 def _row(item: dict):              # DB 形式 → スプレッドシート 1 行
     return [item.get(h, "") for h in _HEADERS]
 
-def _noop(*_, **__): pass          # フォールバック用ダミー
+def _noop(*args, **kwargs): pass          # フォールバック用ダミー
 
 try:
     # ── 認証 & シート取得 ─────────────────────────────
     if not (os.path.exists(CREDS_PATH) and SHEET_ID):
         raise RuntimeError("GS_CREDS_JSON または GS_SHEET_ID が未設定")
-
-    gc     = gspread.service_account(filename=CREDS_PATH)
+    
+    gc = gspread.service_account(filename=CREDS_PATH)
     _sheet = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
-
+    
     # ── UPSERT ───────────────────────────────────────
     def upsert(item: dict):
         try:
@@ -48,7 +48,7 @@ try:
         except gspread.exceptions.CellNotFound:
             _sheet.append_row(_row(item), value_input_option="USER_ENTERED")
         print("GSHEETS", item["slug"])
-
+        
 except Exception as e:
     print("⚠️  Google Sheets 連携をスキップ:", repr(e))
     traceback.print_exc()
