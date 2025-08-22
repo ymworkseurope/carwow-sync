@@ -1,4 +1,3 @@
-
 # rev: 2025-08-24 T01:10Z (修正版)
 """
 Google Sheets 連携ユーティリティ
@@ -22,7 +21,31 @@ _HEADERS = [
 ]
 
 def _row(item: dict):              # DB 形式 → スプレッドシート 1 行
-    return [item.get(h, "") for h in _HEADERS]
+    row = []
+    for h in _HEADERS:
+        value = item.get(h, "")
+        
+        # リスト型のデータを文字列に変換
+        if isinstance(value, list):
+            if h == "media_urls":
+                # media_urlsは改行区切りで結合
+                value = "\n".join(str(url) for url in value)
+            else:
+                # その他のリストはカンマ区切り
+                value = ", ".join(str(v) for v in value)
+        
+        # 辞書型のデータをJSON文字列に変換
+        elif isinstance(value, dict):
+            import json
+            value = json.dumps(value, ensure_ascii=False)
+        
+        # その他の型は文字列に変換
+        else:
+            value = str(value) if value is not None else ""
+        
+        row.append(value)
+    
+    return row
 
 def _noop(*args, **kwargs): pass          # フォールバック用ダミー
 
@@ -37,32 +60,32 @@ try:
     # ── UPSERT ───────────────────────────────────────
     def upsert(item: dict):
         try:
-            # slugでセルを検索
-            cell = sheet.find(item["slug"])
-            # 見つかった場合は行全体を更新
-            sheet.update(
-                f"A{cell.row}:{chr(64+len(_HEADERS))}{cell.row}",
-                [_row(item)],
-                value_input_option="USER_ENTERED"
-            )
-            print(f"GSHEETS UPDATED: {item['slug']} (row {cell.row})")
-        except gspread.exceptions.APIError as e:
-            # セルが見つからない場合（APIError として処理）
-            if "Unable to parse range" in str(e) or "not found" in str(e).lower():
-                # 新規行として追加
-                sheet.append_row(_row(item), value_input_option="USER_ENTERED")
-                print(f"GSHEETS ADDED: {item['slug']} (new row)")
-            else:
-                raise e
-        except Exception as e:
-            # その他のエラーの場合も新規追加を試行
-            print(f"GSHEETS FIND ERROR for {item['slug']}: {e}")
+            # slugでセルを検索（B列のslugを検索）
             try:
+                # slugが格納されているB列から検索
+                slug_cells = sheet.findall(item["slug"])
+                if slug_cells:
+                    cell = slug_cells[0]  # 最初に見つかったセルを使用
+                    # 見つかった場合は行全体を更新
+                    sheet.update(
+                        f"A{cell.row}:{chr(64+len(_HEADERS))}{cell.row}",
+                        [_row(item)],
+                        value_input_option="USER_ENTERED"
+                    )
+                    print(f"GSHEETS UPDATED: {item['slug']} (row {cell.row})")
+                else:
+                    # 見つからない場合は新規追加
+                    sheet.append_row(_row(item), value_input_option="USER_ENTERED")
+                    print(f"GSHEETS ADDED: {item['slug']} (new row)")
+            except Exception as find_error:
+                print(f"GSHEETS FIND ERROR for {item['slug']}: {find_error}")
+                # 検索でエラーが発生した場合も新規追加を試行
                 sheet.append_row(_row(item), value_input_option="USER_ENTERED")
-                print(f"GSHEETS ADDED: {item['slug']} (fallback)")
-            except Exception as append_error:
-                print(f"GSHEETS APPEND ERROR for {item['slug']}: {append_error}")
-                raise append_error
+                print(f"GSHEETS ADDED: {item['slug']} (fallback after find error)")
+                
+        except Exception as e:
+            print(f"GSHEETS ERROR for {item['slug']}: {e}")
+            raise e
         
 except Exception as e:
     print("⚠️  Google Sheets 連携をスキップ:", repr(e))
