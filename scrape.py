@@ -148,14 +148,15 @@ def validate_supabase_payload(payload: Dict) -> tuple[bool, str]:
         except json.JSONDecodeError as e:
             errors.append(f"Invalid JSON in spec_json: {e}")
     
-    media_urls = payload.get("media_urls", "[]")
-    if media_urls:
-        try:
-            parsed = json.loads(media_urls)
-            if not isinstance(parsed, list):
-                errors.append(f"media_urls must be a JSON array, got: {type(parsed)}")
-        except json.JSONDecodeError as e:
-            errors.append(f"Invalid JSON in media_urls: {e}")
+    media_urls = payload.get("media_urls", [])
+if media_urls is not None:
+    if not isinstance(media_urls, list):
+        errors.append(f"media_urls must be an array, got: {type(media_urls)}")
+    else:
+        # 各URLが文字列かチェック
+        for i, url in enumerate(media_urls):
+            if not isinstance(url, str):
+                errors.append(f"media_urls[{i}] must be a string, got: {type(url)}")
     
     # 文字列長の検証
     string_fields = {
