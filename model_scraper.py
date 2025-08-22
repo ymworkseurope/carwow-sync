@@ -1,12 +1,12 @@
 # model_scraper.py
-# rev: 2025-08-24 修正版
+# rev: 2025-08-24 修正版（slug生成改良）
 import re, json, time, random, requests, bs4
 from urllib.parse import urljoin, urlparse
 from slugify import slugify
 from typing import Dict, List
 
 UA = ("Mozilla/5.0 (+https://github.com/ymworkseurope/"
-      "carwow-sync 2025-08-23)")
+      "carwow-sync 2025-08-24)")
 HEAD = {"User-Agent": UA}
 
 def _get(url: str, **kw) -> requests.Response:
@@ -40,8 +40,18 @@ def scrape(url: str) -> Dict:
     
     # URLからメーカー名とモデル名を抽出
     path_parts = urlparse(url).path.strip('/').split('/')
-    make_en = path_parts[0] if len(path_parts) > 0 else ""
-    model_en = path_parts[1] if len(path_parts) > 1 else ""
+    if len(path_parts) < 2:
+        raise ValueError(f"Invalid URL format: {url}")
+    
+    make_raw = path_parts[0]
+    model_raw = path_parts[1]
+    
+    # メーカー名とモデル名の正規化
+    make_en = make_raw.replace('-', ' ').title().strip()
+    model_en = model_raw.replace('-', ' ').title().strip()
+    
+    # slug生成（メーカー名-モデル名の形式）
+    slug = f"{make_raw}-{model_raw}"
     
     # タイトル
     title_elem = top.select_one("h1")
@@ -67,6 +77,12 @@ def scrape(url: str) -> Dict:
         if intro_sections:
             overview = " ".join(p.get_text(strip=True) for p in intro_sections[:2])
     
+    # まだ見つからない場合、車種説明を探す
+    if not overview:
+        desc_sections = top.select("[data-testid*='description'] p, .description p, .content p")
+        if desc_sections:
+            overview = " ".join(p.get_text(strip=True) for p in desc_sections[:2])
+    
     ## ======= Model, Body type, Fuel =======
     glance = top.select_one(".review-overview__at-a-glance-model")
     body_type = fuel = None
@@ -79,27 +95,41 @@ def scrape(url: str) -> Dict:
             elif k.startswith("Available fuel"): 
                 fuel = v
     
+    # 別の方法でbody_typeとfuelを探す
+    if not body_type or not fuel:
+        spec_text = top.get_text()
+        
+        # Body typeパターン
+        body_match = re.search(r'Body type[:\s]+([^\n]+)', spec_text, re.IGNORECASE)
+        if body_match and not body_type:
+            body_type = body_match.group(1).strip()
+        
+        # Fuel typeパターン  
+        fuel_match = re.search(r'(?:Fuel|Engine)[:\s]+([^\n]+)', spec_text, re.IGNORECASE)
+        if fuel_match and not fuel:
+            fuel = fuel_match.group(1).strip()
+    
     # 仕様情報の抽出（JSON形式）
     spec_data = {}
-    spec_sections = top.select(".specifications table, .specs table")
+    spec_sections = top.select(".specifications table, .specs table, table")
     for table in spec_sections:
         for row in table.select("tr"):
             cells = row.select("td, th")
             if len(cells) >= 2:
                 key = cells[0].get_text(strip=True)
                 value = cells[1].get_text(strip=True)
-                if key and value:
+                if key and value and len(key) < 100:  # 長すぎるキーは除外
                     spec_data[key] = value
     
     ## ======= 画像 =======
     media_urls = _clean_imgs(top, url)
     
     return {
-        "slug": slugify(f"{make_en}-{model_en}"),
+        "slug": slug,
         "url": url,
         "title": title,
-        "make_en": make_en.title(),  # 最初の文字を大文字に
-        "model_en": model_en.replace('-', ' ').title(),  # ハイフンをスペースに、タイトルケース
+        "make_en": make_en,
+        "model_en": model_en,
         "overview_en": overview,
         "body_type": body_type,
         "fuel": fuel,
