@@ -1,5 +1,5 @@
 # scrape.py
-# rev: 2025-08-24 修正版（動的車両カタログ検出対応）
+# rev: 2025-08-24 デバッグ版（詳細エラー表示+修正）
 import os, re, json, sys, time, random, requests, bs4, backoff
 from urllib.parse import urlparse
 from typing import List, Dict
@@ -113,19 +113,92 @@ def iter_model_urls() -> List[str]:
         print(f"サイトマップ取得エラー: {e}")
         return []
 
+def validate_supabase_payload(payload: Dict) -> tuple[bool, str]:
+    """Supabaseのペイロードを詳細検証"""
+    errors = []
+    
+    # 必須フィールドのチェック
+    required_fields = ["id", "slug", "make_en", "model_en"]
+    for field in required_fields:
+        if not payload.get(field):
+            errors.append(f"Missing required field: {field}")
+    
+    # データ型のチェック
+    if payload.get("price_min_gbp") is not None:
+        if not isinstance(payload["price_min_gbp"], (int, float)) or payload["price_min_gbp"] < 0:
+            errors.append(f"Invalid price_min_gbp: {payload['price_min_gbp']}")
+    
+    if payload.get("price_max_gbp") is not None:
+        if not isinstance(payload["price_max_gbp"], (int, float)) or payload["price_max_gbp"] < 0:
+            errors.append(f"Invalid price_max_gbp: {payload['price_max_gbp']}")
+    
+    if payload.get("price_min_jpy") is not None:
+        if not isinstance(payload["price_min_jpy"], (int, float)) or payload["price_min_jpy"] < 0:
+            errors.append(f"Invalid price_min_jpy: {payload['price_min_jpy']}")
+    
+    if payload.get("price_max_jpy") is not None:
+        if not isinstance(payload["price_max_jpy"], (int, float)) or payload["price_max_jpy"] < 0:
+            errors.append(f"Invalid price_max_jpy: {payload['price_max_jpy']}")
+    
+    # JSON文字列の検証
+    spec_json = payload.get("spec_json", "{}")
+    if spec_json:
+        try:
+            json.loads(spec_json)
+        except json.JSONDecodeError as e:
+            errors.append(f"Invalid JSON in spec_json: {e}")
+    
+    media_urls = payload.get("media_urls", "[]")
+    if media_urls:
+        try:
+            parsed = json.loads(media_urls)
+            if not isinstance(parsed, list):
+                errors.append(f"media_urls must be a JSON array, got: {type(parsed)}")
+        except json.JSONDecodeError as e:
+            errors.append(f"Invalid JSON in media_urls: {e}")
+    
+    # 文字列長の検証
+    string_fields = {
+        "slug": 100,
+        "make_en": 50, 
+        "model_en": 50,
+        "make_ja": 50,
+        "model_ja": 50,
+        "body_type": 50,
+        "fuel": 50,
+        "overview_en": 2000,
+        "overview_ja": 2000
+    }
+    
+    for field, max_len in string_fields.items():
+        value = payload.get(field)
+        if value and len(str(value)) > max_len:
+            errors.append(f"{field} too long ({len(str(value))} > {max_len}): {str(value)[:50]}...")
+    
+    # ID形式の検証
+    if payload.get("id"):
+        if not re.match(r'^[a-f0-9]{12}$', payload["id"]):
+            errors.append(f"Invalid ID format: {payload['id']}")
+    
+    return len(errors) == 0, "; ".join(errors)
+
 def db_upsert(item: Dict):
-    """Supabase UPSERT（改良版）"""
+    """Supabase UPSERT（詳細デバッグ版）"""
     if not (SUPABASE_URL and SUPABASE_KEY):
         print("SKIP Supabase:", item.get("slug", "unknown"))
         return
     
     try:
-        # データ検証
-        if not item.get("slug"):
-            print(f"WARNING: slugがありません - {item}")
+        # 詳細なデータ検証
+        is_valid, error_msg = validate_supabase_payload(item)
+        if not is_valid:
+            print(f"VALIDATION ERROR for {item.get('slug', 'unknown')}: {error_msg}")
+            print(f"Payload: {json.dumps(item, indent=2, default=str)}")
             return
-            
-        # リクエスト送信
+        
+        # Supabaseへのリクエスト
+        print(f"Sending to Supabase: {item['slug']}")
+        
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/cars",
             headers={
@@ -138,39 +211,45 @@ def db_upsert(item: Dict):
             timeout=30
         )
         
-        # エラー詳細の取得
+        # 詳細なエラー情報の表示
         if not r.ok:
-            error_detail = r.text
-            print(f"SUPABASE ERROR [{r.status_code}] {item['slug']}: {error_detail}")
+            print(f"\n=== SUPABASE ERROR [{r.status_code}] for {item['slug']} ===")
+            print(f"Request URL: {r.url}")
+            print(f"Request headers: {dict(r.request.headers)}")
+            print(f"Response headers: {dict(r.headers)}")
+            print(f"Response body: {r.text}")
             
-            if r.status_code == 400:
-                try:
-                    error_json = r.json()
-                    print(f"Error details: {json.dumps(error_json, indent=2)}")
-                except:
-                    print(f"Raw error response: {r.text}")
+            # ペイロードの詳細表示
+            print(f"\nSent payload:")
+            print(json.dumps(item, indent=2, ensure_ascii=False, default=str))
+            
+            try:
+                error_json = r.json()
+                print(f"\nParsed error: {json.dumps(error_json, indent=2)}")
+            except:
+                pass
             
             r.raise_for_status()
         
         print("SUPABASE OK", item["slug"])
         
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP Error for {item.get('slug', 'unknown')}: {e}")
-        if hasattr(e, 'response'):
-            print(f"Response: {e.response.text}")
+        print(f"\nHTTP Error for {item.get('slug', 'unknown')}: {e}")
         raise
     except Exception as e:
-        print(f"Unexpected error for {item.get('slug', 'unknown')}: {e}")
+        print(f"\nUnexpected error for {item.get('slug', 'unknown')}: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 def save_to_backup(payload: Dict):
     """バックアップ用にローカルファイルに保存"""
     backup_file = "backup_data.jsonl"
     with open(backup_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 def validate_payload(payload: Dict) -> bool:
-    """ペイロードの基本検証（修正版）"""
+    """ペイロードの基本検証"""
     required_fields = ["slug", "make_en", "model_en"]
     
     for field in required_fields:
@@ -178,9 +257,8 @@ def validate_payload(payload: Dict) -> bool:
             print(f"WARNING: 必須フィールド '{field}' がありません")
             return False
     
-    # slugの形式チェック（修正）
+    # slugの形式チェック
     slug = payload.get("slug", "")
-    # メーカー名-モデル名の形式であることをチェック
     if not re.match(r'^[a-z0-9\-]+-[a-z0-9\-\+]+$', slug):
         print(f"WARNING: 無効なslug形式: {slug}")
         return False
@@ -195,10 +273,10 @@ if __name__ == "__main__":
         print("sample 5:", ["/".join(urlparse(u).path.strip("/").split("/"))
                             for u in urls[:5]])
     
-    # デバッグモード（最初の10件のみ）
+    # デバッグモード（最初の3件のみでテスト）
     DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
     if DEBUG_MODE:
-        urls = urls[:10]
+        urls = urls[:3]
         print(f"DEBUG MODE: 最初の{len(urls)}件のみ処理")
     
     raw_fp = open("raw.jsonl", "w", encoding="utf-8")
@@ -207,11 +285,15 @@ if __name__ == "__main__":
     for i, url in enumerate(tqdm(urls, desc="scrape")):
         _sleep()
         try:
+            print(f"\n--- Processing {i+1}/{len(urls)}: {url} ---")
+            
             # 1. スクレイピング
             raw = scrape_one(url)
+            print(f"Scraped data keys: {list(raw.keys())}")
             
             # 2. データ変換
             payload = to_payload(raw)
+            print(f"Transformed payload keys: {list(payload.keys())}")
             
             # 3. データ検証
             if not validate_payload(payload):
@@ -233,12 +315,10 @@ if __name__ == "__main__":
                     print(f"Google Sheets エラー: {e}")
             
             # 7. RAWデータ保存
-            raw_fp.write(json.dumps(raw, ensure_ascii=False) + "\n")
+            raw_fp.write(json.dumps(raw, ensure_ascii=False, default=str) + "\n")
             ok += 1
             
-            # 進捗表示
-            if (i + 1) % 50 == 0:
-                print(f"\n進捗: {i + 1}/{len(urls)} ({ok} success, {err} errors)")
+            print(f"SUCCESS: {payload['slug']}")
             
         except Exception as e:
             print(f"[ERR] {url} {repr(e)}", file=sys.stderr)
@@ -248,6 +328,11 @@ if __name__ == "__main__":
             traceback.print_exc()
             
             err += 1
+            
+            # 早期エラー停止（デバッグ用）
+            if DEBUG_MODE and err >= 1:
+                print("デバッグモード: エラーが発生したため停止します。")
+                break
             
             # エラーが多い場合は停止
             if err > 10 and ok == 0:
