@@ -9,13 +9,14 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
-    # ■ ここから env は 4 スペース空けてジョブの一部として定義 ■
     env:
       SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
       DEEPL_KEY:      ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
+      GBP_TO_JPY:     "195"
+      DEBUG_MODE:     "false"  # 本番実行時はfalse、テスト時はtrue
 
     steps:
       - uses: actions/checkout@v4
@@ -46,3 +47,9 @@ jobs:
           name: raw-jsonl
           path: raw.jsonl
 
+      - name: Upload backup data (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-data
+          path: backup_data.jsonl
