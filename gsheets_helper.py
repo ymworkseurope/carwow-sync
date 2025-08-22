@@ -1,4 +1,4 @@
-# gsheets_helper.py
+
 # rev: 2025-08-24 T01:10Z (修正版)
 """
 Google Sheets 連携ユーティリティ
@@ -8,11 +8,9 @@ Google Sheets 連携ユーティリティ
   ※シート（タブ）名が固定なら下の WS_NAME を書き換えるだけでも可
 """
 import os, gspread, traceback
-
 CREDS_PATH = "secrets/gs_creds.json"
 SHEET_ID   = os.getenv("GS_SHEET_ID")          # Workflow から渡す
 WS_NAME    = "system_cars"                     # ← タブ名をここで固定
-
 _HEADERS = [
     "id","slug",
     "make_en","model_en","make_ja","model_ja",
@@ -34,20 +32,37 @@ try:
         raise RuntimeError("GS_CREDS_JSON または GS_SHEET_ID が未設定")
     
     gc = gspread.service_account(filename=CREDS_PATH)
-    _sheet = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
+    sheet = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
     
     # ── UPSERT ───────────────────────────────────────
     def upsert(item: dict):
         try:
-            cell = _sheet.find(item["slug"])
-            _sheet.update(
+            # slugでセルを検索
+            cell = sheet.find(item["slug"])
+            # 見つかった場合は行全体を更新
+            sheet.update(
                 f"A{cell.row}:{chr(64+len(_HEADERS))}{cell.row}",
                 [_row(item)],
                 value_input_option="USER_ENTERED"
             )
-        except gspread.exceptions.CellNotFound:
-            _sheet.append_row(_row(item), value_input_option="USER_ENTERED")
-        print("GSHEETS", item["slug"])
+            print(f"GSHEETS UPDATED: {item['slug']} (row {cell.row})")
+        except gspread.exceptions.APIError as e:
+            # セルが見つからない場合（APIError として処理）
+            if "Unable to parse range" in str(e) or "not found" in str(e).lower():
+                # 新規行として追加
+                sheet.append_row(_row(item), value_input_option="USER_ENTERED")
+                print(f"GSHEETS ADDED: {item['slug']} (new row)")
+            else:
+                raise e
+        except Exception as e:
+            # その他のエラーの場合も新規追加を試行
+            print(f"GSHEETS FIND ERROR for {item['slug']}: {e}")
+            try:
+                sheet.append_row(_row(item), value_input_option="USER_ENTERED")
+                print(f"GSHEETS ADDED: {item['slug']} (fallback)")
+            except Exception as append_error:
+                print(f"GSHEETS APPEND ERROR for {item['slug']}: {append_error}")
+                raise append_error
         
 except Exception as e:
     print("⚠️  Google Sheets 連携をスキップ:", repr(e))
