@@ -132,12 +132,19 @@ def to_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     elif spec_json is None:
         spec_json = "{}"
     
-    # media_urlsの処理
-    media_urls = raw.get("media_urls", "[]")
-    if isinstance(media_urls, list):
-        media_urls = json.dumps(media_urls, ensure_ascii=False)
+    # media_urlsの処理（配列として送信）
+    media_urls = raw.get("media_urls", [])
+    if isinstance(media_urls, str):
+        try:
+            media_urls = json.loads(media_urls)
+        except json.JSONDecodeError:
+            media_urls = []
     elif media_urls is None:
-        media_urls = "[]"
+        media_urls = []
+    
+    # 配列として保持（JSON文字列にしない）
+    if not isinstance(media_urls, list):
+        media_urls = []
     
     # overview情報の処理
     overview_en = raw.get("overview_en", "").strip()
@@ -159,7 +166,7 @@ def to_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         "price_min_jpy": price_min_jpy,
         "price_max_jpy": price_max_jpy,
         "spec_json": spec_json,
-        "media_urls": media_urls,
+        "media_urls": media_urls,  # 配列として送信
         "updated_at": datetime.utcnow().isoformat() + 'Z'
     }
     
