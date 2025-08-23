@@ -22,16 +22,20 @@ CREDS_PATH = "secrets/gs_creds.json"
 SHEET_ID   = os.getenv("GS_SHEET_ID")
 WS_NAME    = "system_cars"
 
-HEADERS = [                    # Supabase と同じ順
+_HEADERS = [
     "id","slug",
     "make_en","model_en","make_ja","model_ja",
-    "body_type","body_type_ja","fuel",
-    "price_min_gbp","price_max_gbp","price_min_jpy","price_max_jpy",
+    "body_type","body_type_ja",      # ← 追加
+    "fuel",
+    "price_min_gbp","price_max_gbp",
+    "price_min_jpy","price_max_jpy",
     "overview_en","overview_ja",
-    "spec_json","media_urls","catalog_url",
-    "doors","seats","dimensions_mm","drive_type",
-    "grades","engines","colors",
-    "full_model_ja","updated_at",
+    "spec_json","media_urls",
+    "catalog_url",                  # ← 追加
+    "doors","seats","dimensions_mm",
+    "drive_type","drive_type_ja",   # ← 追加
+    "grades","engines","colors",    # ← 追加
+    "updated_at"
 ]
 
 # ──────────── util ────────────
