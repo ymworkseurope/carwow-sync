@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# gsheets_helper.py – 2025-08-27 full
+# gsheets_helper.py – 2025-08-27 fixed A1 range & header sync
 
 """
 Google Sheets 連携ユーティリティ
-────────────────────────────────────────
-必要な環境変数
-  GS_SHEET_ID      : スプレッドシートの ID
-  （URL の /d/ と /edit の間にある長い文字列）
+────────────────────────────────────
+必須環境変数
+  GS_CREDS_JSON : サービスアカウント JSON（一行）
+  GS_SHEET_ID   : スプレッドシート ID
+────────────────────────────────────
 """
 
-import os, json, traceback, gspread
-from typing import List
+import os, json, gspread, traceback
+from gspread.utils import rowcol_to_a1
 
 CREDS_PATH = "secrets/gs_creds.json"
-SHEET_ID   = os.getenv("GS_SHEET_ID")          # GitHub Actions から渡す
-WS_NAME    = "system_cars"                     # ← タブ名（固定して良い）
+SHEET_ID   = os.getenv("GS_SHEET_ID")      # Workflow env
+WS_NAME    = "system_cars"                 # ← 固定タブ名
 
-# ─────────────── シートの論理カラム定義 ───────────────
-HEADERS: List[str] = [
+# ───────── スキーマ定義（Supabase と一致させる） ─────────
+_HEADERS = [
     "id","slug",
     "make_en","model_en","make_ja","model_ja",
     "body_type","body_type_ja","fuel",
@@ -25,85 +26,70 @@ HEADERS: List[str] = [
     "price_min_jpy","price_max_jpy",
     "overview_en","overview_ja",
     "spec_json","media_urls",
-    "catalog_url",
-    "doors","seats","dimensions_mm","drive_type",
-    "grades","engines","colors",
+    "catalog_url","doors","seats","dimensions_mm",
+    "drive_type","grades","engines","colors",
     "full_model_ja","updated_at"
 ]
 
-# ─────────────── 共通ユーティリティ ───────────────
-def _row(payload: dict) -> List[str]:
-    """Supabase 用 dict → Sheets 1 行（文字列リスト）"""
-    out = []
-    for h in HEADERS:
-        v = payload.get(h, "")
+# ───────── util ─────────
+def _dump(v):
+    if isinstance(v, list):
+        # media_urls だけは改行、それ以外カンマ
+        sep = "\n" if all(u.startswith("http") for u in v) else ", "
+        return sep.join(map(str, v))
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)
+    return "" if v is None else str(v)
 
-        # list → 改行区切り
-        if isinstance(v, list):
-            out.append("\n".join(map(str, v)))
-        # dict → JSON 文字列
-        elif isinstance(v, dict):
-            out.append(json.dumps(v, ensure_ascii=False))
-        # それ以外
-        else:
-            out.append("" if v is None else str(v))
-    return out
+def _row(item: dict):
+    """payload → シート 1 行（配列）"""
+    return [_dump(item.get(h)) for h in _HEADERS]
 
+# ───────── Sheet 接続 ─────────
+def _noop(*a, **kw): ...
 
-def _ensure_header(ws):
-    """ヘッダ行が無ければ作成、列不足があれば追記"""
-    cur = ws.row_values(1)
-    if cur == HEADERS:
-        return
-
-    if not cur:        # 1 行目が空
-        ws.insert_row(HEADERS, 1)
-        print("GSHEETS: ヘッダ行を新規作成しました")
-    else:              # 既存ヘッダに不足列があれば右側へ追加
-        diff = [c for c in HEADERS if c not in cur]
-        if diff:
-            ws.update(
-                f"{chr(65+len(cur))}1:{chr(64+len(cur)+len(diff))}1",
-                [diff]
-            )
-            print(f"GSHEETS: ヘッダに列を追加 → {diff}")
-
-
-def _noop(*args, **kwargs): ...
-upsert = _noop  # デフォルトは無効化しておく
-
-# ─────────────── 認証 & シート準備 ───────────────
 try:
     if not (os.path.exists(CREDS_PATH) and SHEET_ID):
         raise RuntimeError("GS_CREDS_JSON または GS_SHEET_ID が未設定")
 
-    gc  = gspread.service_account(filename=CREDS_PATH)
-    ws  = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
-    _ensure_header(ws)
+    gc     = gspread.service_account(filename=CREDS_PATH)
+    ws     = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
 
-    # ────── 公開 API ──────
+    # ―― ヘッダを自動整合 ――――――――――――――――――――――――――
+    def _ensure_header():
+        cur = ws.row_values(1)
+        if cur == _HEADERS:
+            return
+        if cur == []:
+            ws.insert_row(_HEADERS, 1)
+        else:
+            # 差分があれば 1 行目を総入れ替え
+            ws.update(rowcol_to_a1(1, 1) + ':' + rowcol_to_a1(1, len(_HEADERS)),
+                      [_HEADERS], value_input_option="RAW")
+        print("GSHEETS HEADER SYNCED")
+
+    _ensure_header()
+
+    # ───────── public: UPSERT ─────────
     def upsert(item: dict):
-        """slug で検索 → あれば更新、無ければ append"""
         try:
-            cells = ws.findall(item["slug"])
-            if cells:                       # 既存行を更新
-                row_idx = cells[0].row
-                ws.update(
-                    f"A{row_idx}:{chr(64+len(HEADERS))}{row_idx}",
-                    [_row(item)],
-                    value_input_option="USER_ENTERED"
-                )
-                print(f"GSHEETS UPDATED: {item['slug']} (row {row_idx})")
-            else:                           # 末尾に追加
-                ws.append_row(
-                    _row(item),
-                    value_input_option="USER_ENTERED"
-                )
-                print(f"GSHEETS ADDED: {item['slug']} (new row)")
+            # 1. slug を検索
+            matches = ws.findall(item["slug"])
+            if matches:
+                r = matches[0].row
+                # 2. 行更新
+                rng = f"{rowcol_to_a1(r,1)}:{rowcol_to_a1(r,len(_HEADERS))}"
+                ws.update(rng, [_row(item)], value_input_option="USER_ENTERED")
+                print(f"GSHEETS UPDATED row {r}: {item['slug']}")
+            else:
+                # 3. 末尾追加
+                ws.append_row(_row(item), value_input_option="USER_ENTERED")
+                print(f"GSHEETS ADDED: {item['slug']}")
         except Exception as e:
-            print(f"GSHEETS ERROR for {item['slug']}: {e}")
+            print(f"GSHEETS ERROR {item['slug']}: {e}")
             traceback.print_exc()
 
 except Exception as e:
-    print("⚠️  Google Sheets 連携をスキップ:", repr(e))
+    print("⚠️  Google Sheets 連携をスキップ:", e)
     traceback.print_exc()
+    upsert = _noop
