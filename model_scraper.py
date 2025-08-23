@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# model_scraper.py – 2025-08-28 robust summary parser
+# model_scraper.py – 2025-08-29 colours & dimensions fix
 
 import re, json, time, random, requests, bs4
 from urllib.parse import urljoin, urlparse
 from typing import Dict, List, Optional
 
-UA = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-28)"
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-29)"
 HEAD = {"User-Agent": UA}
 
 def _get(url): r = requests.get(url, headers=HEAD, timeout=30); r.raise_for_status(); return r
@@ -28,28 +28,27 @@ def _imgs(doc, base, lim=12):
         if len(out)>=lim: break
     return out
 
-# ──────────────────────────────────────────
 LABEL_RE = {
-    "doors" : re.compile(r"\bdoor"),
-    "seats" : re.compile(r"\bseat"),
-    "drive" : re.compile(r"\bdrive|drivetrain|transmission"),
-    "dims"  : re.compile(r"dimension|length|size"),
+    "doors": re.compile(r"\bdoor"),
+    "seats": re.compile(r"\bseat\b"),
+    "drive": re.compile(r"\bdrive|drivetrain|transmission"),
+    "dims" : re.compile(r"dimension|length|size"),
 }
 
-def _extract_from_blocks(blocks, doors, seats, dims, drive):
-    for label, val in blocks:
-        l = label.lower()
+def _scan_pairs(pairs, doors, seats, dims, drive):
+    for lab,val in pairs:
+        l=lab.lower()
         if LABEL_RE["doors"].search(l):
-            m=re.search(r"(\d+)", val); doors = m.group(1) if m else doors
+            m=re.search(r"(\d+)", val); doors=m.group(1) if m else doors
         elif LABEL_RE["seats"].search(l):
-            m=re.search(r"(\d+)", val); seats = m.group(1) if m else seats
+            m=re.search(r"\b(\d)\b", val)           # 1–9 のみ許容
+            if m: seats=m.group(1)
         elif LABEL_RE["drive"].search(l):
-            drive = val
+            drive=val
         elif LABEL_RE["dims"].search(l) and "mm" in val:
-            dims = val
-    return doors, seats, dims, drive
+            dims=val
+    return doors,seats,dims,drive
 
-# ──────────────────────────────────────────
 def scrape(url:str)->Dict:
     doc=_bs(url); _sleep()
     make_raw, model_raw = urlparse(url).path.strip("/").split("/")[:2]
@@ -60,14 +59,16 @@ def scrape(url:str)->Dict:
     h1=doc.select_one("h1")
     title=h1.get_text(" ",strip=True) if h1 else f"{make_en} {model_en}"
 
-    price_m = re.search(r"£([\d,]+)\s*[–-]\s*£([\d,]+)", doc.text)
-    if price_m:
-        pmin,pmax=(int(price_m[1].replace(",","")), int(price_m[2].replace(",","")))
+    pmin=pmax=None
+    m=re.search(r"£([\d,]+)\s*[–-]\s*£([\d,]+)", doc.text)
+    if m:
+        pmin,pmax=(int(m[1].replace(",","")),int(m[2].replace(",","")))
     else:
-        one=re.search(r"From\s+£([\d,]+)", doc.text)
-        pmin=pmax=int(one[1].replace(",","")) if one else None
+        m=re.search(r"From\s+£([\d,]+)", doc.text)
+        if m: pmin=pmax=int(m[1].replace(",",""))
 
-    overview_el=doc.select_one("em"); overview=overview_el.get_text(strip=True) if overview_el else ""
+    overview=doc.select_one("em")
+    overview=overview.get_text(strip=True) if overview else ""
 
     body_type=fuel=None
     glance=doc.select_one(".review-overview__at-a-glance-model")
@@ -78,22 +79,18 @@ def scrape(url:str)->Dict:
             if "Available fuel" in k: fuel="要確認" if v.lower()=="chooser" else v
 
     doors=seats=dims=drive_type=None
+    # --- summary-list on TOP -------------------------------------------
+    pairs=[(dt.get_text(" ",strip=True), dd.get_text(" ",strip=True))
+           for i in doc.select(".summary-list__item")
+           for dt,dd in [(i.select_one("dt"), i.select_one("dd"))] if dt and dd]
+    doors,seats,dims,drive_type=_scan_pairs(pairs,doors,seats,dims,drive_type)
 
-    # --- main page summary-list blocks ---
-    blocks=[]
-    for item in doc.select(".summary-list__item"):
-        dt=item.select_one("dt"); dd=item.select_one("dd")
-        if dt and dd:
-            blocks.append((dt.get_text(" ",strip=True), dd.get_text(" ",strip=True)))
-    doors,seats,dims,drive_type=_extract_from_blocks(blocks,doors,seats,dims,drive_type)
-
-    # --- /specifications ---
+    # --- /specifications ------------------------------------------------
     grades,engines=[],[]
     spec=_maybe_bs(url.rstrip("/")+"/specifications")
     if spec:
         _sleep()
         grades=[g.get_text(strip=True) for g in spec.select("span.trim-article__title-part-2")]
-
         rows=[]
         rows += [(th.get_text(" ",strip=True), td.get_text(" ",strip=True))
                  for tr in spec.select("table tr")
@@ -101,26 +98,38 @@ def scrape(url:str)->Dict:
         rows += [(dt.get_text(" ",strip=True), dd.get_text(" ",strip=True))
                  for dt,dd in [(i.select_one("dt"), i.select_one("dd"))
                                for i in spec.select(".summary-list__item")] if dt and dd]
-
-        for label,val in rows:
+        for lab,val in rows:
             if re.search(r"(ps|hp|kw)", val.lower()):
-                engines.append(f"{label} {val}")
-        doors,seats,dims,drive_type=_extract_from_blocks(rows,doors,seats,dims,drive_type)
+                engines.append(f"{lab} {val}")
+        doors,seats,dims,drive_type=_scan_pairs(rows,doors,seats,dims,drive_type)
 
-        # dimensions in svg title
+        # SVG dimensions fallback
         if not dims:
             svg=spec.select_one("svg title")
-            if svg and "mm" in svg.text:
-                parts=re.findall(r"\d[\d,]+\s*mm", svg.text)
-                if len(parts)==3: dims=" / ".join(parts)
+            if svg:
+                nums=re.findall(r"\d[\d,]+\s*mm", svg.text)
+                if len(nums)==3: dims=" / ".join(nums)
 
-    # --- /colours ---
-    colours=[]
+        # “External dimensions” 文言 fallback
+        if not dims:
+            ext=re.search(r"External dimensions\s+([\d,]+\s*mm\s+[\d,]+\s*mm\s+[\d,]+\s*mm)", spec.text)
+            if ext:
+                nums=re.findall(r"[\d,]+\s*mm", ext[1])
+                if len(nums)==3: dims=" / ".join(nums)
+
+    # --- colours (TOP & /colours) --------------------------------------
+    colours=set()
+    # ① TOP
+    colours.update([c.get_text(" ",strip=True).split(" - ",1)[-1]
+                    for c in doc.select("h4.model-hub__colour-details-title")])
+    # ② 下層
     col=_maybe_bs(url.rstrip("/")+"/colours")
     if col:
         _sleep()
-        colours=sorted({c.get_text(strip=True) for c in col.select("figcaption, .colour-picker__name")})
+        colours.update([c.get_text(strip=True)
+                        for c in col.select("figcaption, .colour-picker__name")])
 
+    # assemble -----------------------------------------------------------
     return {
         "slug":slug,"url":url,"title":title,
         "make_en":make_en,"model_en":model_en,
@@ -135,6 +144,6 @@ def scrape(url:str)->Dict:
         "drive_type":drive_type,
         "grades":grades or None,
         "engines":engines or None,
-        "colors":colours or None,
+        "colors":sorted(colours) or None,
         "catalog_url":url,
     }
