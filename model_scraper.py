@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# model_scraper.py – 2025-08-26 robust / インデント確定版
+# model_scraper.py – 2025-08-26 full
+
 import re, json, time, random, requests, bs4
 from urllib.parse import urljoin, urlparse
 from typing import Dict, List
@@ -7,7 +8,7 @@ from typing import Dict, List
 UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-26)"
 HEAD = {"User-Agent": UA}
 
-# ───────────────── helpers ─────────────────
+# ───────── helpers ─────────
 def _get(url: str) -> requests.Response:
     r = requests.get(url, headers=HEAD, timeout=30)
     r.raise_for_status()
@@ -15,11 +16,11 @@ def _get(url: str) -> requests.Response:
 
 
 def _bs(url: str):
-    """URL→BeautifulSoup"""
+    """URL → BeautifulSoup"""
     return bs4.BeautifulSoup(_get(url).text, "lxml")
 
 
-def _sleep():
+def _sleep():  # 軽いスロットリング
     time.sleep(random.uniform(0.6, 1.1))
 
 
@@ -40,9 +41,9 @@ def _clean_imgs(doc: bs4.BeautifulSoup, base: str, limit: int = 12) -> List[str]
     return out
 
 
-# ───────────────── main ────────────────────
+# ───────── main ─────────
 def scrape(url: str) -> Dict:
-    """モデルページをスクレイプして dict で返す"""
+    """モデルページをスクレイプして dict を返す"""
     doc = _bs(url)
     _sleep()
 
@@ -52,13 +53,23 @@ def scrape(url: str) -> Dict:
     model_en = model_raw.replace("-", " ").title()
     slug     = f"{make_raw}-{model_raw}"
 
-    # タイトル・価格
-    title   = doc.select_one("h1").get_text(" ", strip=True) if doc.select_one("h1") else f"{make_en} {model_en}"
-    price_m = re.search(r"£([\d,]+)\D+£([\d,]+)", doc.text)
-    pmin, pmax = (int(price_m[1].replace(",", "")), int(price_m[2].replace(",", ""))) if price_m else (None, None)
+    # タイトル
+    h1 = doc.select_one("h1")
+    title = h1.get_text(" ", strip=True) if h1 else f"{make_en} {model_en}"
 
-    # 概要 (<em>)
-    overview = doc.select_one("em").get_text(strip=True) if doc.select_one("em") else ""
+    # 価格（本体価格のみ）
+    price_m = re.search(r"£([\d,]+)\s*[–-]\s*£([\d,]+)", doc.text)
+    if price_m:
+        pmin, pmax = (int(price_m[1].replace(",", "")), int(price_m[2].replace(",", "")))
+    else:  # “From £19,995” だけ載っている場合
+        one_m = re.search(r"From\s+£([\d,]+)", doc.text)
+        pmin = pmax = int(one_m[1].replace(",", "")) if one_m else (None)
+    if isinstance(pmin, tuple):  # fall-back guard
+        pmin = pmax = None
+
+    # 概要
+    overview = doc.select_one("em")
+    overview = overview.get_text(strip=True) if overview else ""
 
     # Body type / Fuel
     body_type = fuel = None
@@ -73,30 +84,48 @@ def scrape(url: str) -> Dict:
 
     # Summary items
     def _summary(label: str) -> str | None:
-        node = doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
-        return node.get_text(strip=True) if node else None
+        n = doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
+        return n.get_text(strip=True) if n else None
 
     doors = _summary("Number of doors")
     seats = _summary("Number of seats")
     trans = _summary("Transmission")
 
-    dim_m = re.search(r"([\d,]+\\s*mm)\\s*/\\s*([\d,]+\\s*mm)\\s*/\\s*([\d,]+\\s*mm)", doc.text)
+    dim_m = re.search(r"([\d,]+\s*mm)\s*/\s*([\d,]+\s*mm)\s*/\s*([\d,]+\s*mm)", doc.text)
     dims  = " / ".join(dim_m.groups()) if dim_m else None
 
-    # Grades / engines from specifications
-    grades, engines = [], []
+    # Grades / Engines / Colours 取得
+    grades, engines, colors = [], [], []
     try:
         spec = _bs(url.rstrip("/") + "/specifications")
         _sleep()
+
         grades = [s.get_text(strip=True) for s in spec.select("span.trim-article__title-part-2")] or []
-        for tr in spec.select("table tr"):
-            tds = [td.get_text(" ", strip=True) for td in tr.select("td")]
-            if len(tds) == 2 and re.search(r"(PS|hp|kW)", tds[1]):
+
+        for tr in spec.select("table tr, .summary-list__item"):
+            tds = [td.get_text(" ", strip=True) for td in tr.select("td, dd")]
+            if len(tds) < 2:
+                continue
+            label, val = tds[0].lower(), tds[1]
+
+            if re.search(r"(ps|hp|kw)", val.lower()):
                 engines.append(" ".join(tds))
+
+            if "door" in label:
+                doors = re.search(r"(\d+)", val).group(1)
+            if "seat" in label:
+                seats = re.search(r"(\d+)", val).group(1)
+            if "length" in label:
+                dims = val
+
+        # colours ページ
+        col = _bs(url.rstrip("/") + "/colours")
+        colors = sorted(
+            {c.get_text(strip=True) for c in col.select("figcaption, .colour-picker__name")}
+        )
     except Exception:
         pass
 
-    # 返却 dict
     return {
         "slug": slug,
         "url": url,
@@ -119,5 +148,6 @@ def scrape(url: str) -> Dict:
         "drive_type": trans,
         "grades": grades or None,
         "engines": engines or None,
+        "colors": colors or None,
         "catalog_url": url,
     }
