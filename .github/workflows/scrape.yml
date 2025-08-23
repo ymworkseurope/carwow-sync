@@ -16,30 +16,46 @@ jobs:
       GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
       GBP_TO_JPY:     "195"
-      DEBUG_MODE:     "false"  # 本番実行時はfalse、テスト時はtrue
+      DEBUG_MODE:     "false"           # 本番: false, テスト: true
+      MAKES_FOR_BODYMAP: "abarth"       # 半角スペース区切りで複数指定可
 
     steps:
+      # ① ソース取得
       - uses: actions/checkout@v4
 
+      # ② Python 3.11 セットアップ
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # ③ 依存パッケージ（selenium / webdriver-manager 含む）をインストール
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ④ Google サービスアカウント JSON をファイル化
       - name: Write Google service-account key
         if: env.GS_CREDS_JSON != ''
         run: |
           mkdir -p secrets
           echo "$GS_CREDS_JSON" > secrets/gs_creds.json
 
+      # ⑤ メーカーごとに body_type マップ生成（Selenium）
+      - name: Build body_type map (multi make)
+        run: |
+          IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
+          for make in "${MAKES[@]}"; do
+            echo "▶ Build body map for ${make}"
+            python body_type_mapper.py "${make}"
+          done
+
+      # ⑥ クローラー本体
       - name: Run crawler → Supabase & Google Sheets
         run: |
           python scrape.py
 
+      # ⑦ 生データを artifact に保存（常に実行）
       - name: Upload raw dump (always)
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,6 +63,7 @@ jobs:
           name: raw-jsonl
           path: raw.jsonl
 
+      # ⑧ バックアップデータを artifact に保存（常に実行）
       - name: Upload backup data (always)
         if: always()
         uses: actions/upload-artifact@v4
