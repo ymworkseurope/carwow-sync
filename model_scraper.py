@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
-return r
+# model_scraper.py – 2025-08-26 robust / indent-safe
+import os, re, json, time, random, requests, bs4
+from urllib.parse import urljoin, urlparse
+from typing import Dict, List
+
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-26)"
+HEAD = {"User-Agent": UA}
+
+# ---------- helpers ----------
+def _get(url: str) -> requests.Response:
+    r = requests.get(url, headers=HEAD, timeout=30)
+    r.raise_for_status()
+    return r
 
 
 def _bs(url: str):
-return bs4.BeautifulSoup(_get(url).text, "lxml")
+    """URL → BeautifulSoup"""
+    return bs4.BeautifulSoup(_get(url).text, "lxml")
 
 
 def _sleep():
-time.sleep(random.uniform(0.6, 1.1))
+    time.sleep(random.uniform(0.6, 1.1))
 
-
-EXCLUDE_IMG = ("logo", "icon", "badge", "sprite", "favicon")
-
-
-def _clean_imgs(doc: bs4.BeautifulSoup, base: str, limit=12) -> List[str]:
-out: List[str] = []
-for img in doc.select("img[src]"):
-src = img["src"]
-if any(k in src.lower() for k in EXCLUDE_IMG):
-continue
-full = urljoin(base, src)
-if full.startswith("http") and full not in out:
-out.append(full)
-if len(out) >= limit:
-break
-return out
-
-
-# ---------- main ----------
 
 
 def scrape(url: str) -> Dict:
