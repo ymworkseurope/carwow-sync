@@ -1,92 +1,116 @@
-# rev: 2025-08-24 T01:10Z (修正版)
+#!/usr/bin/env python3
+# gsheets_helper.py – 2025-08-30 full
 """
 Google Sheets 連携ユーティリティ
 ────────────────────────────────────────
 必要な環境変数
-  GS_SHEET_ID      : スプレッドシートの ID（URL の /d/ と /edit の間の長い文字列）
-  ※シート（タブ）名が固定なら下の WS_NAME を書き換えるだけでも可
+  GS_SHEET_ID      : スプレッドシートの ID
+  GS_CREDS_JSON    : サービスアカウント JSON （workflow 側で secrets に渡す）
+
+備考
+  • シート（タブ）名は WS_NAME で固定
+  • 1 行目がヘッダー。足りない列は自動で挿入
+  • slug が既存行にあれば UPDATE、無ければ APPEND
+  • 26 列超え（AA, AB…）も自前で A1 参照を生成
 """
-import os, gspread, traceback
+from __future__ import annotations
+import os, json, gspread, traceback
+from typing import Any
+
+# ───────── 設定 ─────────
 CREDS_PATH = "secrets/gs_creds.json"
-SHEET_ID   = os.getenv("GS_SHEET_ID")          # Workflow から渡す
-WS_NAME    = "system_cars"                     # ← タブ名をここで固定
-_HEADERS = [
+SHEET_ID   = os.getenv("GS_SHEET_ID")
+WS_NAME    = "system_cars"
+
+HEADERS = [                    # Supabase と同じ順
     "id","slug",
     "make_en","model_en","make_ja","model_ja",
-    "body_type","fuel",
-    "price_min_gbp","price_max_gbp",
-    "price_min_jpy","price_max_jpy",
+    "body_type","body_type_ja","fuel",
+    "price_min_gbp","price_max_gbp","price_min_jpy","price_max_jpy",
     "overview_en","overview_ja",
-    "spec_json","media_urls","updated_at"
+    "spec_json","media_urls","catalog_url",
+    "doors","seats","dimensions_mm","drive_type",
+    "grades","engines","colors",
+    "full_model_ja","updated_at",
 ]
 
-def _row(item: dict):              # DB 形式 → スプレッドシート 1 行
-    row = []
-    for h in _HEADERS:
-        value = item.get(h, "")
-        
-        # リスト型のデータを文字列に変換
-        if isinstance(value, list):
-            if h == "media_urls":
-                # media_urlsは改行区切りで結合
-                value = "\n".join(str(url) for url in value)
-            else:
-                # その他のリストはカンマ区切り
-                value = ", ".join(str(v) for v in value)
-        
-        # 辞書型のデータをJSON文字列に変換
-        elif isinstance(value, dict):
-            import json
-            value = json.dumps(value, ensure_ascii=False)
-        
-        # その他の型は文字列に変換
-        else:
-            value = str(value) if value is not None else ""
-        
-        row.append(value)
-    
-    return row
+# ──────────── util ────────────
+def _col_letter(idx: int) -> str:
+    """1-index → A,B,…,Z,AA,AB…"""
+    s = ""
+    while idx:
+        idx, rem = divmod(idx-1, 26)
+        s = chr(65+rem) + s
+    return s
 
-def _noop(*args, **kwargs): pass          # フォールバック用ダミー
+def _serialize(v: Any, col_name:str) -> str:
+    """セル用文字列へ変換"""
+    if v is None:       return ""
+    if isinstance(v, (int,float)): return str(v)
+    if isinstance(v, list):
+        if col_name=="media_urls":
+            return "\n".join(map(str,v))          # 改行区切り
+        return ", ".join(map(str,v))              # カンマ区切り
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)  # JSON 文字列
+    return str(v)
+
+def _row_dict_to_list(item:dict) -> list[str]:
+    return [_serialize(item.get(h), h) for h in HEADERS]
+
+def _ensure_header(ws):
+    """ヘッダー列が不足していれば追加"""
+    cur = ws.row_values(1)
+    if cur==HEADERS: return
+    if not cur:  # 空シート
+        ws.insert_row(HEADERS, 1)
+        return
+    # 既存 + 追加
+    need = [h for h in HEADERS if h not in cur]
+    ws.update(f"A1:{_col_letter(len(cur)+len(need))}1", [cur+need])
+
+# ──────────── main ────────────
+def _noop(*a, **kw): ...
 
 try:
-    # ── 認証 & シート取得 ─────────────────────────────
     if not (os.path.exists(CREDS_PATH) and SHEET_ID):
         raise RuntimeError("GS_CREDS_JSON または GS_SHEET_ID が未設定")
-    
-    gc = gspread.service_account(filename=CREDS_PATH)
-    sheet = gc.open_by_key(SHEET_ID).worksheet(WS_NAME)
-    
-    # ── UPSERT ───────────────────────────────────────
+
+    gc     = gspread.service_account(filename=CREDS_PATH)
+    sheet  = gc.open_by_key(SHEET_ID)
+    try:
+        ws = sheet.worksheet(WS_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sheet.add_worksheet(title=WS_NAME, rows="100", cols="50")
+
+    _ensure_header(ws)
+
     def upsert(item: dict):
         try:
-            # slugでセルを検索（B列のslugを検索）
+            slug = str(item["slug"])
+            # B列（slug）全体を一度だけ取得
+            slug_col = 2
+            slugs = ws.col_values(slug_col)[1:]  # 2行目から
             try:
-                # slugが格納されているB列から検索
-                slug_cells = sheet.findall(item["slug"])
-                if slug_cells:
-                    cell = slug_cells[0]  # 最初に見つかったセルを使用
-                    # 見つかった場合は行全体を更新
-                    sheet.update(
-                        f"A{cell.row}:{chr(64+len(_HEADERS))}{cell.row}",
-                        [_row(item)],
-                        value_input_option="USER_ENTERED"
-                    )
-                    print(f"GSHEETS UPDATED: {item['slug']} (row {cell.row})")
-                else:
-                    # 見つからない場合は新規追加
-                    sheet.append_row(_row(item), value_input_option="USER_ENTERED")
-                    print(f"GSHEETS ADDED: {item['slug']} (new row)")
-            except Exception as find_error:
-                print(f"GSHEETS FIND ERROR for {item['slug']}: {find_error}")
-                # 検索でエラーが発生した場合も新規追加を試行
-                sheet.append_row(_row(item), value_input_option="USER_ENTERED")
-                print(f"GSHEETS ADDED: {item['slug']} (fallback after find error)")
-                
+                idx = slugs.index(slug) + 2      # 行番号 (1-based)
+            except ValueError:
+                idx = None
+
+            if idx:          # UPDATE
+                start = f"A{idx}"
+                end   = f"{_col_letter(len(HEADERS))}{idx}"
+                ws.update(f"{start}:{end}", [_row_dict_to_list(item)],
+                          value_input_option="USER_ENTERED")
+                print(f"GSHEETS UPDATED: {slug} (row {idx})")
+            else:            # APPEND
+                ws.append_row(_row_dict_to_list(item),
+                              value_input_option="USER_ENTERED")
+                print(f"GSHEETS ADDED: {slug} (new row)")
         except Exception as e:
-            print(f"GSHEETS ERROR for {item['slug']}: {e}")
+            print(f"GSHEETS ERROR for {item.get('slug')}: {e}")
+            traceback.print_exc()
             raise e
-        
+
 except Exception as e:
     print("⚠️  Google Sheets 連携をスキップ:", repr(e))
     traceback.print_exc()
