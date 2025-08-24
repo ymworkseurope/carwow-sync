@@ -54,36 +54,7 @@ def _parse_make_model(title: str, fallback_make: str) -> tuple[str,str]:
         return fallback_make, model or fallback_make
     return fallback_make, t
 
-# ───────────────────────── レビューページ判定
-def is_review_page(url: str) -> bool:
-    """
-    URLがレビューページかリストページかを判定
-    レビューページ: car-reviews タブがアクティブ
-    リストページ: それ以外（automatic, used, deals等）
-    """
-    try:
-        doc = _bs(url)
-        # car-reviews タブがアクティブかチェック
-        tab = doc.select_one('a[data-main-menu-section="car-reviews"]')
-        if tab and 'is-active' in tab.get('class', []):
-            return True
-        
-        # 代替: URLパターンでも判定
-        path = urlparse(url).path.strip('/')
-        parts = path.split('/')
-        if len(parts) == 2:
-            make, model = parts
-            # 除外パターン
-            exclude = ['automatic', 'manual', 'used', 'lease', 'deals', 
-                      'electric', 'hybrid', 'colours', 'specifications']
-            if model in exclude:
-                return False
-            # モデル名パターン（数字を含む、ハイフン区切り等）
-            if re.match(r'^[a-z0-9-]+$', model) and len(model) > 1:
-                return True
-        return False
-    except Exception:
-        return False
+# レビューページ判定は scrape.py に移動
 
 # ───────────────────────── 価格抽出の修正
 def _extract_prices(doc: bs4.BeautifulSoup) -> tuple[Optional[int], Optional[int]]:
@@ -220,10 +191,6 @@ def _get_overview(doc: bs4.BeautifulSoup) -> str:
 
 # ───────────────────────── scrape main
 def scrape(url: str) -> Dict:
-    # レビューページチェック
-    if not is_review_page(url):
-        raise ValueError(f"Not a review page: {url}")
-    
     doc = _bs(url)
     _sleep()
 
