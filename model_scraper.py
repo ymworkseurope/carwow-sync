@@ -19,6 +19,21 @@ def _bs(url: str) -> bs4.BeautifulSoup:
 def _sleep():
     time.sleep(random.uniform(0.6, 1.1))
 
+def is_review_page(url: str) -> bool:
+    """URLがレビューページかどうか判定"""
+    try:
+        doc = _bs(url)
+        _sleep()
+        
+        # グローバルメニューの「Reviews」が選択状態（is-activeクラス）かチェック
+        reviews_menu = doc.select_one('a[data-main-menu-section="car-reviews"]')
+        if reviews_menu and 'is-active' in reviews_menu.get('class', []):
+            return True
+            
+        return False
+    except Exception:
+        return False
+
 # ギャラリードメイン許可リスト
 _GALLERY_DOMAINS = (
     "images.prismic.io",        # 新 CMS
