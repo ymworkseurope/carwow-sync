@@ -1,178 +1,118 @@
 #!/usr/bin/env python3
-# model_scraper.py ― 2025-09-01 gallery-only / 正式版
+# model_scraper.py ― 2025-09-02 full (Review 除外・正式名称抽出・gallery only)
+
 import re, json, time, random, requests, bs4
 from urllib.parse import urljoin, urlparse
 from typing import Dict, List, Optional
 
-UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-09-01)"
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-09-02)"
 HEAD = {"User-Agent": UA}
 
+# ───────────────────────── helpers
 def _get(url: str) -> requests.Response:
     r = requests.get(url, headers=HEAD, timeout=30)
     r.raise_for_status()
     return r
 
 def _bs(url: str) -> bs4.BeautifulSoup:
-    """URL → BeautifulSoup"""
     return bs4.BeautifulSoup(_get(url).text, "lxml")
 
-def _sleep():
-    time.sleep(random.uniform(0.6, 1.1))
+def _sleep(): time.sleep(random.uniform(0.6, 1.1))
 
-def is_review_page(url: str) -> bool:
-    """URLがレビューページかどうか判定"""
-    try:
-        doc = _bs(url)
-        _sleep()
-        
-        # グローバルメニューの「Reviews」が選択状態（is-activeクラス）かチェック
-        reviews_menu = doc.select_one('a[data-main-menu-section="car-reviews"]')
-        if reviews_menu and 'is-active' in reviews_menu.get('class', []):
-            return True
-            
-        return False
-    except Exception:
-        return False
-
-# ギャラリードメイン許可リスト
-_GALLERY_DOMAINS = (
-    "images.prismic.io",        # 新 CMS
-    "car-data.carwow.co.uk",    # 旧静止画 API
-)
+_GALLERY_DOMAINS = ("images.prismic.io", "car-data.carwow.co.uk")
 
 def _gallery_imgs(doc: bs4.BeautifulSoup, base: str, limit: int = 20) -> List[str]:
-    """
-    1️⃣ ページ内の『ギャラリー / スライダー』画像だけを抽出  
-       ・class='media-slider__image'（srcset or src）  
-       ・縦サムネ : .thumbnail-carousel-vertical__img[data-src]  
-    2️⃣ 許可ドメインかどうかでホワイトリスト  
-    3️⃣ limit 枚で打ち切り
-    """
-    out: List[str] = []
-
-    candidates = (
+    imgs = (
         doc.select("img.media-slider__image[srcset]") +
         doc.select("img.media-slider__image[src]") +
         doc.select("img.thumbnail-carousel-vertical__img[data-src]")
     )
-
-    for img in candidates:
+    out: List[str] = []
+    for img in imgs:
         src = img.get("srcset") or img.get("src") or img.get("data-src") or ""
-        # `srcset` は「URL 800w, URL 1600w …」の形式なので最高解像度を取る
-        if src and "," in src:
-            # 最高解像度の画像を選択（最後のエントリ）
-            src_parts = [part.strip().split()[0] for part in src.split(",")]
-            src = src_parts[-1] if src_parts else ""
+        if "," in src:                                   # srcset highest-res
+            src = src.split(",")[-1].split()[0]
         else:
-            src = src.split()[0] if src else ""
-        
-        if not src:
-            continue
-            
+            src = src.split()[0]
+        if not src: continue
         full = urljoin(base, src)
-
-        # ホワイトリスト & 重複チェック & 有効URL確認
-        if (full.startswith(("http://", "https://")) and 
-            any(dom in full for dom in _GALLERY_DOMAINS) and 
-            full not in out):
+        if (full.startswith("http")
+            and any(dom in full for dom in _GALLERY_DOMAINS)
+            and full not in out):
             out.append(full)
-            if len(out) >= limit:
-                break
+            if len(out) >= limit: break
     return out
 
-def _safe_int(value: str) -> Optional[int]:
-    """文字列を安全にintに変換"""
-    if not value:
-        return None
-    # 数字のみ抽出
-    digits = re.sub(r'[^\d]', '', str(value))
-    return int(digits) if digits.isdigit() else None
+def _safe_int(val: str) -> Optional[int]:
+    d = re.sub(r"[^\d]", "", str(val or ""))
+    return int(d) if d.isdigit() else None
 
+def _parse_make_model(title: str, fallback_make: str) -> tuple[str,str]:
+    t = re.sub(r"review.*$", "", title, flags=re.I).strip()
+    if t.lower().startswith(fallback_make.lower()):
+        model = t[len(fallback_make):].strip()
+        return fallback_make, model or fallback_make
+    return fallback_make, t
+
+# ───────────────────────── scrape main
 def scrape(url: str) -> Dict:
-    """車両モデルページ（例: …/bmw/5-series）→ dict"""
-    doc = _bs(url)
-    _sleep()
+    doc = _bs(url); _sleep()
 
-    # ── 基本 name / slug ──────────────────────────────
-    path_parts = urlparse(url).path.strip("/").split("/")
-    if len(path_parts) < 2:
-        raise ValueError(f"Invalid URL format: {url}")
-    
-    make_raw, model_raw = path_parts[:2]
-    make_en  = make_raw.replace("-", " ").title()
-    model_en = model_raw.replace("-", " ").title()
-    slug     = f"{make_raw}-{model_raw}"
+    make_slug, model_slug = urlparse(url).path.strip("/").split("/")[:2]
+    fallback_make = make_slug.replace("-", " ").title()
 
-    # ── タイトル & 価格帯 ─────────────────────────────
-    title_node = doc.select_one("h1")
-    title   = title_node.get_text(" ", strip=True) if title_node else f"{make_en} {model_en}"
+    h1 = doc.select_one("h1")
+    title_txt = h1.get_text(" ", strip=True) if h1 else f"{fallback_make} {model_slug}"
+    make_en, model_en = _parse_make_model(title_txt, fallback_make)
+
+    slug = f"{make_slug}-{model_slug}"
 
     price_m = re.search(r"£([\d,]+)\D+£([\d,]+)", doc.text)
-    pmin, pmax = (
-        (int(price_m[1].replace(",", "")), int(price_m[2].replace(",", "")))
-        if price_m else (None, None)
-    )
+    pmin, pmax = (int(price_m[1].replace(",", "")), int(price_m[2].replace(",", ""))) if price_m else (None, None)
 
-    # ── 概要 ───────────────────────────────────────────
-    overview_node = doc.select_one("em")
-    overview = overview_node.get_text(strip=True) if overview_node else ""
+    overview = doc.select_one("em")
+    overview = overview.get_text(strip=True) if overview else ""
 
-    # ── Body type / Fuel ──────────────────────────────
-    body_type, fuel = None, None
+    body_type = fuel = None
     glance = doc.select_one(".review-overview__at-a-glance-model")
     if glance:
         cells = [c.get_text(strip=True) for c in glance.select("div")]
         for k, v in zip(cells[::2], cells[1::2]):
-            if "Body type" in k:
-                body_type = [t.strip() for t in re.split(r",|/|&", v) if t.strip()]
-            elif "Available fuel" in k:
-                fuel = v if v.lower() != "chooser" else None
+            if "Body type" in k: body_type = [s.strip() for s in re.split(r",|/|&", v) if s.strip()]
+            elif "Available fuel" in k and v.lower() != "chooser": fuel = v
 
-    # ── Summary list ──────────────────────────────────
-    def _summary(label: str) -> Optional[str]:
-        node = doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
-        return node.get_text(strip=True) if node else None
+    def _summary(label):                                       # summary list
+        n = doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
+        return n.get_text(strip=True) if n else None
 
     doors = _summary("Number of doors")
     seats = _summary("Number of seats")
     trans = _summary("Transmission")
 
-    # Dimensions: SVG に embed されている mm 値 3 つを取得
     dim_m = re.search(r"(\d{1,3}[,\d]*\s*mm)[^m]{0,30}(\d{1,3}[,\d]*\s*mm)[^m]{0,30}(\d{1,3}[,\d]*\s*mm)", doc.text)
-    dims  = " / ".join(dim_m.groups()) if dim_m else None
+    dims = " / ".join(dim_m.groups()) if dim_m else None
 
-    # ── Grades / Engines ─────────────────────────────
     grades, engines = [], []
     try:
-        spec_url = url.rstrip("/") + "/specifications"
-        spec = _bs(spec_url)
-        _sleep()
-        grades = [s.get_text(strip=True) for s in spec.select("span.trim-article__title-part-2")] or []
+        spec = _bs(url.rstrip("/") + "/specifications"); _sleep()
+        grades = [s.get_text(strip=True) for s in spec.select("span.trim-article__title-part-2")]
         for tr in spec.select("table tr"):
             tds = [td.get_text(" ", strip=True) for td in tr.select("td")]
-            if len(tds) == 2 and re.search(r"(PS|hp|kW|kWh)", tds[1]):
-                engines.append(" ".join(tds))
-    except Exception:
-        pass
+            if len(tds) == 2 and re.search(r"(PS|hp|kW|kWh)", tds[1]): engines.append(" ".join(tds))
+    except Exception: pass
 
-    # ── Colours ──────────────────────────────────────
     colors = []
     try:
-        col_url = url.rstrip("/") + "/colours"
-        col = _bs(col_url)
-        _sleep()
+        col = _bs(url.rstrip("/") + "/colours"); _sleep()
         for h4 in col.select(".model-hub__colour-details-title"):
-            color_text = h4.get_text(" ", strip=True)
-            if color_text:
-                colors.append(" ".join(color_text.split()))
-    except Exception:
-        pass
+            t = " ".join(h4.get_text(" ", strip=True).split())
+            if t: colors.append(t)
+    except Exception: pass
 
-    # ── 返却 dict ────────────────────────────────────
     return {
         "slug": slug,
         "url": url,
-        "title": title,
+        "title": title_txt,
         "make_en": make_en,
         "model_en": model_en,
         "overview_en": overview,
