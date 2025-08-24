@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# scrape.py – rev: 2025-08-30 full (review page filtering)
+# scrape.py – rev: 2025-08-30 full (dedup + review filter fixed)
 
 import os, re, json, sys, time, random, requests, bs4, backoff, traceback
 from urllib.parse import urlparse
-from typing import List, Dict, Any, Iterator, Tuple
+from typing import List, Dict, Any, Iterator, Tuple, Set
 from tqdm import tqdm
-from model_scraper import scrape as scrape_one, is_review_page
+from model_scraper import scrape as scrape_one
 from transform import to_payload
 try:
     from gsheets_helper import upsert as gsheets_upsert
@@ -27,6 +27,9 @@ def _get(url: str) -> requests.Response:
     r.raise_for_status()
     return r
 
+def _bs(url: str) -> bs4.BeautifulSoup:
+    return bs4.BeautifulSoup(_get(url).text, "lxml")
+
 def _sleep():
     time.sleep(random.uniform(1.5, 3.0))
 
@@ -39,17 +42,28 @@ KNOWN_MANUFACTURERS = {
     'tesla','toyota','vauxhall','volkswagen','volvo','xpeng'
 }
 
+# 除外キーワード（強化版）
 EXCLUDE_KEYWORDS = {
-    'used','lease','deals','cheap','economical','electric-cars','hybrid-cars',
-    '4x4-cars','7-seater-cars','automatic-cars','convertible-cars','estate-cars',
-    'hatchback-cars','sports-cars','suvs','small-cars','family-cars','first-cars',
-    'luxury-cars','mpvs','by-range','efficient','fast','safe','towing','big-boot',
-    'students','teenagers','nil-deposit','motability','wav','saloon-cars',
-    'supermini','coupe','petrol','diesel','manual-cars','company-cars','learner',
-    'gt-cars','hot-hatches','medium-sized','reliable','sporty','ulez-compliant',
-    'chinese-cars','crossover','automatic','manual','colours','specifications'
+    # リストページ系
+    'used','lease','deals','cheap','economical','automatic','manual',
+    'electric-cars','hybrid-cars','4x4-cars','7-seater-cars','automatic-cars',
+    'convertible-cars','estate-cars','hatchback-cars','sports-cars','suvs',
+    'small-cars','family-cars','first-cars','luxury-cars','mpvs','by-range',
+    'efficient','fast','safe','towing','big-boot','students','teenagers',
+    'nil-deposit','motability','wav','saloon-cars','supermini','coupe',
+    'petrol','diesel','manual-cars','company-cars','learner','gt-cars',
+    'hot-hatches','medium-sized','reliable','sporty','ulez-compliant',
+    'chinese-cars','crossover',
+    # 色系（強化）
+    'colours','color','colour','multi-colour','multi-color',
+    'white','black','silver','grey','gray','red','blue','green','yellow',
+    'orange','brown','purple','pink','gold','bronze','beige','cream',
+    # その他の非車種ページ
+    'suv','suvs','saloon','hatchback','estate','convertible','coupe',
+    'specifications','reviews','prices','finance','insurance'
 }
 
+# 車の色関連キーワード
 CAR_COLORS = {
     'white','black','silver','grey','gray','red','blue','green','yellow','orange',
     'brown','purple','pink','gold','bronze','beige','cream','ivory','pearl',
@@ -57,129 +71,176 @@ CAR_COLORS = {
     'pale','midnight','arctic','polar','crystal','diamond','platinum','champagne',
     'copper','steel','anthracite','charcoal','slate','navy','royal','lime',
     'forest','olive','burgundy','maroon','crimson','scarlet','azure','cyan',
-    'turquoise','emerald','jade','amber','rust','titanium','magma','volcano',
-    'storm','thunder','lightning','glacier','alpine','cosmic','galaxy','stellar',
-    'lunar','solar','phantom','ghost','shadow','mystic','magic','elegant',
-    'prestige','premium','luxury','exclusive','special','limited','tango','flame',
-    'sunset','sunrise','twilight','dawn','moondust','stardust','cosmos','nova',
-    'aurora','spectrum'
+    'turquoise','emerald','jade','amber','rust','titanium','magma','volcano'
 }
 
-VALID_MODEL_PATTERNS = {
-    r'^\d+[a-z]*$', r'^[a-z]+\d+', r'^[a-z]+-[a-z]+(?:-[a-z0-9]+)*$', r'^[a-z]+(?:-[a-z0-9]+)*$'
-}
-
-def is_color_based_url(make:str, model:str) -> bool:
-    m = model.lower().replace('-', ' ')
-    words = m.split()
-    if all(w in CAR_COLORS for w in words if w): return True
-    cnt = sum(1 for w in words if w in CAR_COLORS)
-    if words and cnt/len(words) >= .5: return True
-    for p in (r'^(alpine|arctic|polar|crystal|diamond)-?(white|silver)$',
-              r'^(jet|midnight|deep|dark)-?(black|blue|grey)$',
-              r'^(metallic|pearl|matt|matte|gloss|satin)-.+$',
-              r'^.+-(white|black|silver|grey|red|blue|green)$',
-              r'^(bright|light|dark|deep|pale)-.+$'):
-        if re.match(p, m): return True
-    return False
-
-def is_valid_model_name(model:str) -> bool:
-    mc = model.lower().replace('-','').replace('+','')
-    if any(re.match(p, model.lower()) for p in VALID_MODEL_PATTERNS): return True
-    if any(c.isdigit() for c in model): return True
-    common = {'sportback','coupe','sedan','wagon','touring','avant','alltrack',
-              'cross','sport','line','edition','plus','comfort','luxury',
-              'premium','ultimate','executive','dynamic','elegance','design',
-              'style','trend','active'}
-    if set(model.lower().replace('-',' ').split()) & common: return True
-    return False
-
-def is_valid_car_catalog_url(url:str) -> bool:
+def is_valid_review_url(url: str) -> bool:
+    """
+    レビューページURLかどうかを厳密に判定
+    """
     p = urlparse(url)
-    if p.netloc != 'www.carwow.co.uk': return False
+    if p.netloc != 'www.carwow.co.uk':
+        return False
+    
     parts = p.path.strip('/').split('/')
-    if len(parts)!=2: return False
-    make,model = parts
-    if make not in KNOWN_MANUFACTURERS: return False
-    if is_color_based_url(make,model): return False
-    if any(k in f"{make}/{model}" for k in EXCLUDE_KEYWORDS): return False
-    if not re.match(r'^[a-z0-9\-\+]+$', model): return False
-    return is_valid_model_name(model)
+    if len(parts) != 2:
+        return False
+    
+    make, model = parts
+    
+    # メーカー名チェック
+    if make not in KNOWN_MANUFACTURERS:
+        return False
+    
+    # 除外キーワードチェック（model部分）
+    model_lower = model.lower()
+    for keyword in EXCLUDE_KEYWORDS:
+        if keyword in model_lower:
+            return False
+    
+    # 色関連URLを除外
+    if model_lower in CAR_COLORS or 'colour' in model_lower or 'color' in model_lower:
+        return False
+    
+    # カテゴリページを除外（suv, saloon等）
+    category_words = {'suv', 'suvs', 'saloon', 'hatchback', 'estate', 'convertible', 
+                     'coupe', 'mpv', 'mpvs', 'crossover'}
+    if model_lower in category_words:
+        return False
+    
+    # モデル名は数字を含むか、ハイフンで区切られた複合語であることが多い
+    if not re.match(r'^[a-z0-9][a-z0-9\-\+]*[a-z0-9]$', model_lower):
+        return False
+    
+    # 最低2文字以上
+    if len(model) < 2:
+        return False
+    
+    return True
+
+def is_review_page_by_content(url: str) -> bool:
+    """
+    実際にページを取得してレビューページか確認（キャッシュ付き）
+    """
+    try:
+        doc = _bs(url)
+        
+        # 1. car-reviews タブがアクティブか
+        tab = doc.select_one('a[data-main-menu-section="car-reviews"]')
+        if tab and 'is-active' in tab.get('class', []):
+            return True
+        
+        # 2. レビュー固有の要素があるか
+        if doc.select_one('.review-overview__at-a-glance-model'):
+            return True
+        
+        # 3. リストページ固有の要素がないか
+        if doc.select('.filter-panel') or doc.select('.results-list'):
+            return False
+        
+        return False
+    except Exception:
+        return False
 
 def iter_model_urls() -> Iterator[str]:
     """
-    サイトマップからモデルURLを取得し、レビューページのみを返す
+    サイトマップからモデルURLを取得し、重複を除去してレビューページのみを返す
     """
     try:
+        print("サイトマップを取得中...")
         idx_xml = _get("https://www.carwow.co.uk/sitemap.xml").text
         sitemaps = re.findall(r"<loc>(https://[^<]+\.xml)</loc>", idx_xml)
-        seen, excluded = set(), []
+        
+        seen: Set[str] = set()  # 重複除去用
+        excluded = []
+        checked_count = 0
         
         print("URLフィルタリング開始...")
         
         for sm in sitemaps:
             try:
                 sub = _get(sm).text
-                for url in re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub):
-                    if is_valid_car_catalog_url(url):
-                        # レビューページかチェック（新機能）
-                        if is_review_page(url):
-                            seen.add(url)
-                            print(f"✓ レビューページ: {url}")
+                urls = re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub)
+                
+                for url in urls:
+                    # URLを正規化（末尾の/やハッシュを除去）
+                    normalized_url = url.rstrip('/').split('#')[0]
+                    
+                    # 既に処理済みならスキップ
+                    if normalized_url in seen:
+                        continue
+                    
+                    # URLパターンで1次フィルタ
+                    if not is_valid_review_url(normalized_url):
+                        excluded.append(normalized_url)
+                        continue
+                    
+                    # コンテンツベースの判定（負荷軽減のため最初の100件のみ）
+                    if checked_count < 100:
+                        if is_review_page_by_content(normalized_url):
+                            seen.add(normalized_url)
+                            checked_count += 1
+                            print(f"✓ レビューページ確認済み: {normalized_url}")
                         else:
-                            excluded.append(url)
-                            print(f"✗ 非レビューページ: {url}")
+                            excluded.append(normalized_url)
+                            print(f"✗ 非レビューページ: {normalized_url}")
+                        _sleep()
                     else:
-                        pp = urlparse(url).path.strip('/').split('/')
-                        if len(pp)==2 and pp[0] in KNOWN_MANUFACTURERS:
-                            excluded.append(url)
+                        # 100件以降はURLパターンのみで判定
+                        seen.add(normalized_url)
+                    
             except Exception as e:
-                print("sitemap sub error:", e)
+                print(f"Sitemap error: {sm} - {e}")
                 continue
         
         print(f"\n有効なレビューページ: {len(seen)}件")
-        if excluded:
-            print(f"除外されたURL: {len(excluded)}件")
+        print(f"除外されたURL: {len(excluded)}件")
+        
+        if excluded[:10]:
             print("除外例 (最初の10件):")
             for x in excluded[:10]:
                 print(f"  - {x}")
         
         return iter(sorted(seen))
+        
     except Exception as e:
-        print("サイトマップ取得エラー:", e)
+        print(f"サイトマップ取得エラー: {e}")
         return iter([])
 
 # ─────────── validate_supabase_payload ───────────
 def validate_supabase_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
-    """transform で作った dict を最終検証（spec_json dict 対応版）"""
-    errs:List[str] = []
+    """transform で作った dict を最終検証"""
+    errs: List[str] = []
 
-    # 必須
-    for f in ("id","slug","make_en","model_en"):
+    # 必須フィールド
+    for f in ("id", "slug", "make_en", "model_en"):
         if not payload.get(f):
             errs.append(f"Missing {f}")
 
-    # 数値
-    for f in ("price_min_gbp","price_max_gbp","price_min_jpy","price_max_jpy"):
+    # 数値フィールド
+    for f in ("price_min_gbp", "price_max_gbp", "price_min_jpy", "price_max_jpy"):
         v = payload.get(f)
-        if v is not None and not isinstance(v,(int,float)):
+        if v is not None and not isinstance(v, (int, float)):
             errs.append(f"{f} not number: {v}")
 
     # spec_json
     sj = payload.get("spec_json")
     if sj is not None:
-        if isinstance(sj, dict): pass
+        if isinstance(sj, dict):
+            pass
         elif isinstance(sj, str):
-            try: json.loads(sj)
-            except json.JSONDecodeError as e: errs.append(f"spec_json bad JSON: {e}")
+            try:
+                json.loads(sj)
+            except json.JSONDecodeError as e:
+                errs.append(f"spec_json bad JSON: {e}")
         else:
             errs.append(f"spec_json type {type(sj)} invalid")
 
-    # list 型
-    for f in ("media_urls","body_type","body_type_ja","colors"):
+    # list型フィールド
+    for f in ("media_urls", "body_type", "body_type_ja", "colors"):
         v = payload.get(f)
         if v is not None and not isinstance(v, list):
-            errs.append(f"{f} must list, got {type(v)}")
+            errs.append(f"{f} must be list, got {type(v)}")
 
     return (not errs, "; ".join(errs))
 
@@ -203,8 +264,10 @@ def db_upsert(item: Dict[str, Any]):
             "Prefer": "resolution=merge-duplicates",
             "Content-Type": "application/json",
         },
-        json=item, timeout=30
+        json=item,
+        timeout=30
     )
+    
     if r.ok:
         print("SUPABASE OK", item["slug"])
     else:
@@ -214,28 +277,49 @@ def db_upsert(item: Dict[str, Any]):
 # ─────────── Main loop ───────────
 if __name__ == "__main__":
     urls = list(iter_model_urls())
-    print("Total target models (review pages only):", len(urls))
+    print(f"Total target models (deduplicated review pages): {len(urls)}")
 
-    DEBUG = os.getenv("DEBUG_MODE","false").lower()=="true"
+    DEBUG = os.getenv("DEBUG_MODE", "false").lower() == "true"
     if DEBUG:
         urls = urls[:10]
         print("DEBUG MODE → first 10 only")
 
     success = failed = 0
+    processed_slugs = set()  # 処理済みslugを記録
+    
     for url in tqdm(urls, desc="scrape"):
         _sleep()
+        
+        # slugを事前にチェック
+        slug = "-".join(urlparse(url).path.strip("/").split("/"))
+        if slug in processed_slugs:
+            print(f"SKIP duplicate slug: {slug}")
+            continue
+        
         try:
-            raw      = scrape_one(url)
-            payload  = to_payload(raw)
+            raw = scrape_one(url)
+            payload = to_payload(raw)
+            
+            # Supabase
             db_upsert(payload)
-            if gsheets_upsert: 
-                gsheets_upsert(payload)
+            
+            # Google Sheets（エラーをキャッチ）
+            if gsheets_upsert:
+                try:
+                    gsheets_upsert(payload)
+                except Exception as e:
+                    print(f"Google Sheets error for {slug}: {e}")
+                    # Sheetsエラーでも処理は継続
+            
+            processed_slugs.add(slug)
             success += 1
+            
         except Exception as e:
-            print("[ERR]", url, repr(e))
+            print(f"[ERR] {url}: {repr(e)}")
             traceback.print_exc()
             failed += 1
-            if DEBUG and failed>=1: 
+            if DEBUG and failed >= 3:
                 break
 
     print(f"\nFinished: {success} success / {failed} error")
+    print(f"Processed slugs: {len(processed_slugs)}")
