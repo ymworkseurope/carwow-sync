@@ -108,13 +108,28 @@ def to_jpy(gbp: float|None):
     return int(gbp * GBP_TO_JPY) if gbp else None
 
 def deepl(text: str) -> str:
-    if not (text and DEEPL_KEY): return ""
-    r = requests.post(
-        "https://api-free.deepl.com/v2/translate",
-        data={"auth_key":DEEPL_KEY,"text":text,"source_lang":"EN","target_lang":"JA"},
-        timeout=15,
-    )
-    return r.json()["translations"][0]["text"]
+    """
+    DeepL 翻訳（失敗時は元テキストを返すだけで例外を潰す）
+    """
+    if not (text and DEEPL_KEY):
+        return text
+
+    try:
+        r = requests.post(
+            "https://api-free.deepl.com/v2/translate",
+            data={
+                "auth_key": DEEPL_KEY,
+                "text": text,
+                "source_lang": "EN",
+                "target_lang": "JA",
+            },
+            timeout=15,
+        )
+        j = r.json()
+        return j.get("translations", [{}])[0].get("text", text)
+    except Exception as e:
+        print(f"DeepL error ({e}); using original text")
+        return text
 
 def t_body(bt_en: str) -> str:   
     return BODY_TYPE_JA.get(bt_en, bt_en)
