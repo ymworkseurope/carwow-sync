@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Carwow full‑scraper  – production edition (2025‑09‑final)
+"""Carwow full‑scraper  – production edition (2025‑09‑final‑r2)
 ──────────────────────────────────────────────────────────────
 * **1 model ⇒ 最大 3 HTTP** (main /specifications /colours)
 * Supabase 用の全カラムを収集。
@@ -7,19 +7,13 @@
 * **引数ゼロなら**: カレントディレクトリに存在するすべての
   `body_map_*.json` を巡回して *全車* を取得します。
 
-Usage
------
-```bash
-# スラッグ個別指定
-$ python scrape.py --slugs abarth/500e alfa-romeo/tonale
-
-# メーカー丸ごと
-$ python scrape.py --make abarth
-
-# 引数なし → body_map_* を総当たり（本番バッチ用）
-$ python scrape.py > all_cars.jsonl
-```
-Prints **1 JSON line / car** – jq や Supabase 連携スクリプトへパイプ可。
+主な修正 (r2)
+--------------
+* **“/make/slug” 形式で URL を組み立てる** ─ 旧版は body_map に
+  ベアスラッグ (例 `q5`) が入っていると 404 になっていた。
+* CLI で body_map を展開する際、必ず `make/slug` を付与。
+* `parse_model_page()` 側でもセーフティ: もし 404 が返ったら
+  `/make/slug` を再試行（将来の手書きスラッグでも落ちない）。
 """
 from __future__ import annotations
 
@@ -52,6 +46,8 @@ def fetch(url: str) -> BeautifulSoup:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         if r.ok:
             return BeautifulSoup(r.text, "lxml")
+        if r.status_code == 404:
+            raise requests.HTTPError(response=r)
         time.sleep(1 + i)  # 1s, 2s
     r.raise_for_status()
 
@@ -141,9 +137,20 @@ def scrape_colours(slug: str) -> List[str]:
 # main model page parser
 # ---------------------------------------------------------------------------
 
-def parse_model_page(slug: str) -> Dict[str, Any]:
-    url  = f"{BASE}/{slug}"
-    soup = fetch(url)
+def try_fetch_model(slug: str, make_hint: Optional[str] = None) -> BeautifulSoup:
+    """Fetch /slug ; on 404 retry /make/slug (if make provided)."""
+    try:
+        return fetch(f"{BASE}/{slug}")
+    except requests.HTTPError as e:
+        if e.response.status_code == 404 and make_hint and "/" not in slug:
+            # retry with make prefix
+            return fetch(f"{BASE}/{make_hint}/{slug}")
+        raise
+
+
+def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, Any]:
+    soup = try_fetch_model(slug, make_hint)
+    final_url_path = soup.find("link", rel="canonical").get("href", "").replace(BASE + "/", "") or slug
 
     # title → make / model -------------------------------------------------
     h1 = soup.select_one("h1.header__title")
@@ -158,7 +165,7 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
     glance = {dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
               for dt in soup.select("div.summary-list__item dt")}
 
-    body_type = glance.get("Body type") or body_map.get(slug, [])
+    body_type = glance.get("Body type") or body_map.get(final_url_path, [])
     fuel      = glance.get("Available fuel types")
     doors     = glance.get("Number of doors")
     seats     = glance.get("Number of seats")
@@ -194,8 +201,8 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
             break
 
     # specs / colours ------------------------------------------------------
-    spec_tbl, extra = scrape_specifications(slug)
-    colours = scrape_colours(slug)
+    spec_tbl, extra = scrape_specifications(final_url_path)
+    colours = scrape_colours(final_url_path)
 
     # fallback enrich ------------------------------------------------------
     doors  = doors  or spec_tbl.get("Number of doors")
@@ -208,7 +215,7 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
     spec_json = json.dumps(spec_tbl, ensure_ascii=False)
 
     return {
-        "slug": slug,
+        "slug": final_url_path,
         "make_en": make_en,
         "model_en": model_en,
         "body_type": body_type if isinstance(body_type, list) else ([body_type] if body_type else []),
@@ -225,7 +232,7 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
         "grades": extra.get("grades") if extra else None,
         "engines": extra.get("engines") if extra else None,
         "spec_json": spec_json,
-        "catalog_url": url,
+        "catalog_url": f"{BASE}/{final_url_path}",
     }
 
 # ---------------------------------------------------------------------------
@@ -233,8 +240,18 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def discover_all_body_maps() -> List[str]:
-    """Return list of makes that have body_map_<make>.json present"""
     return [p.stem.replace("body_map_", "") for p in Path(".").glob("body_map_*.json")]
+
+
+def expand_slugs(make: str, inner_slugs: List[str]) -> List[str]:
+    """Prefix bare slugs with make/ for correct URL path."""
+    out: List[str] = []
+    for s in inner_slugs:
+        if "/" in s:
+            out.append(s)
+        else:
+            out.append(f"{make}/{s}")
+    return out
 
 
 def cli():
@@ -248,12 +265,13 @@ def cli():
     if args.slugs:
         slugs += args.slugs
     if args.make:
-        slugs += list(load_body_map(args.make).keys())
+        bm = load_body_map(args.make)
+        slugs += expand_slugs(args.make, list(bm.keys()))
 
-    # --- default: no args → crawl every body_map_* json ------------------
     if not slugs:
         for make in discover_all_body_maps():
-            slugs.extend(load_body_map(make).keys())
+            bm = load_body_map(make)
+            slugs.extend(expand_slugs(make, list(bm.keys())))
         if not slugs:
             ap.error("No body_map_*.json found and no arguments supplied")
 
@@ -263,7 +281,8 @@ def cli():
             continue
         seen.add(slug)
         try:
-            data = parse_model_page(slug)
+            make_hint = slug.split("/")[0] if "/" in slug else None
+            data = parse_model_page(slug, make_hint)
             print(json.dumps(data, ensure_ascii=False))
         except Exception as e:
             print(f"error:{slug}:{e}", file=sys.stderr)
