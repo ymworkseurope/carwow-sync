@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Carwow full‑scraper  –  production edition (2025‑09)
-------------------------------------------------------
-* **1 model → up to 3 HTTP requests**  (main /specifications /colours)  
-* Grabs **all columns** required by Supabase schema.
-  - slug, make_en, model_en, body_type, fuel, price_min/max, doors,
-    seats, dimensions_mm, drive_type, overview, media_urls (max 20),
-    colours, grades, engines, spec_json  … etc.
-* Missing `body_type` は事前に作った `body_map_<make>.json` で補完。
+"""Carwow full‑scraper  – production edition (2025‑09‑final)
+──────────────────────────────────────────────────────────────
+* **1 model ⇒ 最大 3 HTTP** (main /specifications /colours)
+* Supabase 用の全カラムを収集。
+* `body_map_<make>.json` がある場合は body_type を補完。
+* **引数ゼロなら**: カレントディレクトリに存在するすべての
+  `body_map_*.json` を巡回して *全車* を取得します。
 
 Usage
 -----
-```
+```bash
+# スラッグ個別指定
 $ python scrape.py --slugs abarth/500e alfa-romeo/tonale
-$ python scrape.py --make abarth               # メーカー丸ごと
+
+# メーカー丸ごと
+$ python scrape.py --make abarth
+
+# 引数なし → body_map_* を総当たり（本番バッチ用）
+$ python scrape.py > all_cars.jsonl
 ```
-Each run prints **one JSON line per car** to stdout – pipe it into `jq`
-などで確認可能です。
+Prints **1 JSON line / car** – jq や Supabase 連携スクリプトへパイプ可。
 """
 from __future__ import annotations
 
@@ -36,20 +40,20 @@ from bs4 import BeautifulSoup
 BASE       = "https://www.carwow.co.uk"
 HEADERS    = {"User-Agent": "Mozilla/5.0 (carwow-prodbot/1.0)"}
 TIMEOUT    = 20
-MAX_IMAGES = 20      # production：サムネイル含めて 20 枚まで
+MAX_IMAGES = 20      # cap images at 20 / model
 
 # ---------------------------------------------------------------------------
-# small helpers
+# helpers
 # ---------------------------------------------------------------------------
 
 def fetch(url: str) -> BeautifulSoup:
-    """GET and parse – retry ×3 with 1 s back‑off"""
+    """GET + parse with small retry back‑off"""
     for i in range(3):
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         if r.ok:
             return BeautifulSoup(r.text, "lxml")
-        time.sleep(1 + i)
-    r.raise_for_status()  # 最後のレスポンスで例外
+        time.sleep(1 + i)  # 1s, 2s
+    r.raise_for_status()
 
 
 def to_int(txt: str | None) -> Optional[int]:
@@ -62,7 +66,6 @@ def to_int(txt: str | None) -> Optional[int]:
 
 
 def split_make_model(title_core: str) -> Tuple[str, str]:
-    """Simple split: first token = make, rest = model."""
     parts = title_core.split()
     return parts[0], " ".join(parts[1:])
 
@@ -86,53 +89,42 @@ def load_body_map(make: str) -> Dict[str, List[str]]:
 # scrape spec / colours sub‑pages
 # ---------------------------------------------------------------------------
 
-def scrape_specifications(slug: str) -> Tuple[Dict[str, Any], Optional[Dict[str, str]]]:
+def scrape_specifications(slug: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     url = f"{BASE}/{slug}/specifications"
-    soup = fetch(url)
+    try:
+        soup = fetch(url)
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return {}, {}
+        raise
 
     specs: Dict[str, Any] = {}
-    dimensions: Optional[str] = None
-    engines: Dict[str, str] = {}
-    grades: Dict[str, str]  = {}
+    extra: Dict[str, Any] = {}
 
-    # dt/dd table patterns ---------------------------------------------------
+    # dt/dd pairs → raw spec table ----------------------------------------
     for dt in soup.select("div.summary-list__item dt"):
         key = dt.get_text(strip=True)
         val = dt.find_next("dd").get_text(" ", strip=True)
         specs[key] = val
 
-    # dimensions block – numbers with mm inside h4 or li --------------------
-    dim_texts: List[str] = []
+    # Dimensions (mm) ------------------------------------------------------
+    dims: List[str] = []
     for t in soup.select("h4, li"):
         txt = t.get_text(" ", strip=True)
         if "mm" in txt and re.search(r"\d", txt):
-            dim_texts.append(txt)
-    if dim_texts:
-        dimensions = " | ".join(dim_texts)
+            dims.append(txt)
+    if dims:
+        extra["dimensions_mm"] = " | ".join(dims)
 
-    # simple engines / grades: look for <h3>Engines / Trims etc -------------
-    for section in soup.select("h3"):
-        h = section.get_text(strip=True).lower()
+    # Engines / Trims ------------------------------------------------------
+    for h3 in soup.select("h3"):
+        h = h3.get_text(strip=True).lower()
         if "engine" in h:
-            for li in section.find_all_next("li"):
-                engines[len(engines)] = li.get_text(" ", strip=True)
-                if len(engines) >= 10:
-                    break
-        if "trim" in h or "grade" in h:
-            for li in section.find_all_next("li"):
-                grades[len(grades)] = li.get_text(" ", strip=True)
-                if len(grades) >= 10:
-                    break
+            extra["engines"] = [li.get_text(" ", strip=True) for li in h3.find_all_next("li")][:10]
+        if any(k in h for k in ("trim", "grade")):
+            extra["grades"] = [li.get_text(" ", strip=True) for li in h3.find_all_next("li")][:10]
 
-    extra = {}
-    if dimensions:
-        extra["dimensions_mm"] = dimensions
-    if engines:
-        extra["engines"] = list(engines.values())
-    if grades:
-        extra["grades"] = list(grades.values())
-
-    return specs, extra or None
+    return specs, extra
 
 
 def scrape_colours(slug: str) -> List[str]:
@@ -143,11 +135,7 @@ def scrape_colours(slug: str) -> List[str]:
         if e.response.status_code == 404:
             return []
         raise
-    colours: List[str] = []
-    for h4 in soup.select("h4.model-hub__colour-details-title"):
-        name = h4.contents[0].strip()  # first text node before <span>
-        colours.append(name)
-    return colours
+    return [h4.contents[0].strip() for h4 in soup.select("h4.model-hub__colour-details-title")]
 
 # ---------------------------------------------------------------------------
 # main model page parser
@@ -157,20 +145,18 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
     url  = f"{BASE}/{slug}"
     soup = fetch(url)
 
-    # -- title → make / model ----------------------------------------------
+    # title → make / model -------------------------------------------------
     h1 = soup.select_one("h1.header__title")
     if not h1:
-        raise ValueError(f"cannot find title for {slug}")
+        raise ValueError(f"no title for {slug}")
     title_core = re.sub(r" Review.*", "", h1.get_text(strip=True))
     make_en, model_en = split_make_model(title_core)
 
     body_map = load_body_map(make_en)
 
-    # -- At a glance --------------------------------------------------------
-    glance = {
-        dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
-        for dt in soup.select("div.summary-list__item dt")
-    }
+    # At a glance ----------------------------------------------------------
+    glance = {dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
+              for dt in soup.select("div.summary-list__item dt")}
 
     body_type = glance.get("Body type") or body_map.get(slug, [])
     fuel      = glance.get("Available fuel types")
@@ -178,59 +164,54 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
     seats     = glance.get("Number of seats")
     drive_tp  = glance.get("Transmission") or glance.get("Drive type")
 
-    # -- price --------------------------------------------------------------
+    # price ----------------------------------------------------------------
     price_min_gbp = price_max_gbp = None
-    rrp_span = soup.select_one("span.deals-cta-list__rrp-price")
-    if rrp_span and "£" in rrp_span.text:
-        prices = re.findall(r"£[\d,]+", rrp_span.text)
-        if prices:
-            price_min_gbp = to_int(prices[0])
-            if len(prices) > 1:
-                price_max_gbp = to_int(prices[1])
-    else:  # fallback: Used price
+    rrp = soup.select_one("span.deals-cta-list__rrp-price")
+    if rrp and "£" in rrp.text:
+        pounds = re.findall(r"£[\d,]+", rrp.text)
+        if pounds:
+            price_min_gbp = to_int(pounds[0])
+            if len(pounds) > 1:
+                price_max_gbp = to_int(pounds[1])
+    else:
         used_dd = soup.find("dt", string=re.compile("Used", re.I))
         if used_dd:
             price_min_gbp = to_int(used_dd.find_next("dd").text)
 
-    # -- overview paragraph -------------------------------------------------
-    overview_en = ""
+    # overview -------------------------------------------------------------
     lead = soup.select_one("div#main p")
-    if lead:
-        overview_en = lead.get_text(strip=True)
+    overview_en = lead.get_text(strip=True) if lead else ""
 
-    # -- images -------------------------------------------------------------
+    # images ---------------------------------------------------------------
     imgs: List[str] = []
     for im in soup.select("img.media-slider__image, img.thumbnail-carousel-vertical__img"):
         src = im.get("data-src") or im.get("src")
         if src:
-            clean = src.split("?")[0]
-            if clean not in imgs:
-                imgs.append(clean)
+            url_clean = src.split("?")[0]
+            if url_clean not in imgs:
+                imgs.append(url_clean)
         if len(imgs) == MAX_IMAGES:
             break
 
-    # ----------------------------------------------------------------------
-    # specifications / colours pages
-    # ----------------------------------------------------------------------
-    specs_tbl, extra = scrape_specifications(slug)
+    # specs / colours ------------------------------------------------------
+    spec_tbl, extra = scrape_specifications(slug)
     colours = scrape_colours(slug)
 
-    # prefer spec‑page values if glance missing ----------------------------
-    doors  = doors  or specs_tbl.get("Number of doors")
-    seats  = seats  or specs_tbl.get("Number of seats")
-    fuel   = fuel   or specs_tbl.get("Fuel type") or specs_tbl.get("Fuel types")
-    drive_tp = drive_tp or specs_tbl.get("Transmission")
-
+    # fallback enrich ------------------------------------------------------
+    doors  = doors  or spec_tbl.get("Number of doors")
+    seats  = seats  or spec_tbl.get("Number of seats")
+    fuel   = fuel   or spec_tbl.get("Fuel type") or spec_tbl.get("Fuel types")
+    drive_tp = drive_tp or spec_tbl.get("Transmission")
     dimensions_mm = extra.get("dimensions_mm") if extra else None
 
-    # spec_json  – store raw spec table ------------------------------------
-    spec_json = json.dumps(specs_tbl, ensure_ascii=False)
+    # serialise raw spec table --------------------------------------------
+    spec_json = json.dumps(spec_tbl, ensure_ascii=False)
 
     return {
         "slug": slug,
         "make_en": make_en,
         "model_en": model_en,
-        "body_type": body_type if isinstance(body_type, list) else [body_type] if body_type else [],
+        "body_type": body_type if isinstance(body_type, list) else ([body_type] if body_type else []),
         "fuel": fuel,
         "price_min_gbp": price_min_gbp,
         "price_max_gbp": price_max_gbp,
@@ -248,25 +229,39 @@ def parse_model_page(slug: str) -> Dict[str, Any]:
     }
 
 # ---------------------------------------------------------------------------
-# CLI wrapper
+# CLI
 # ---------------------------------------------------------------------------
+
+def discover_all_body_maps() -> List[str]:
+    """Return list of makes that have body_map_<make>.json present"""
+    return [p.stem.replace("body_map_", "") for p in Path(".").glob("body_map_*.json")]
+
 
 def cli():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slugs", nargs="*", help="model slugs a/b c/d …")
-    ap.add_argument("--make", help="scrape every slug in body_map_<make>.json")
+    ap.add_argument("--make", help="scrape all slugs in body_map_<make>.json")
     args = ap.parse_args()
 
-    if not args.slugs and not args.make:
-        ap.error("--slugs または --make を指定してください")
-
     slugs: List[str] = []
+
     if args.slugs:
         slugs += args.slugs
     if args.make:
         slugs += list(load_body_map(args.make).keys())
 
+    # --- default: no args → crawl every body_map_* json ------------------
+    if not slugs:
+        for make in discover_all_body_maps():
+            slugs.extend(load_body_map(make).keys())
+        if not slugs:
+            ap.error("No body_map_*.json found and no arguments supplied")
+
+    seen = set()
     for slug in slugs:
+        if slug in seen:
+            continue
+        seen.add(slug)
         try:
             data = parse_model_page(slug)
             print(json.dumps(data, ensure_ascii=False))
