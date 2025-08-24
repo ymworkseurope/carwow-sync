@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# scrape.py – rev: 2025-08-30 full (spec_json dict 対応版)
+# scrape.py – rev: 2025-08-30 full (review page filtering)
 
 import os, re, json, sys, time, random, requests, bs4, backoff, traceback
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Iterator, Tuple
 from tqdm import tqdm
-from model_scraper import scrape as scrape_one
-from transform      import to_payload
+from model_scraper import scrape as scrape_one, is_review_page
+from transform import to_payload
 try:
     from gsheets_helper import upsert as gsheets_upsert
 except ImportError:
@@ -47,7 +47,7 @@ EXCLUDE_KEYWORDS = {
     'students','teenagers','nil-deposit','motability','wav','saloon-cars',
     'supermini','coupe','petrol','diesel','manual-cars','company-cars','learner',
     'gt-cars','hot-hatches','medium-sized','reliable','sporty','ulez-compliant',
-    'chinese-cars','crossover'
+    'chinese-cars','crossover','automatic','manual','colours','specifications'
 }
 
 CAR_COLORS = {
@@ -107,32 +107,49 @@ def is_valid_car_catalog_url(url:str) -> bool:
     return is_valid_model_name(model)
 
 def iter_model_urls() -> Iterator[str]:
+    """
+    サイトマップからモデルURLを取得し、レビューページのみを返す
+    """
     try:
         idx_xml = _get("https://www.carwow.co.uk/sitemap.xml").text
         sitemaps = re.findall(r"<loc>(https://[^<]+\.xml)</loc>", idx_xml)
         seen, excluded = set(), []
+        
+        print("URLフィルタリング開始...")
+        
         for sm in sitemaps:
             try:
                 sub = _get(sm).text
                 for url in re.findall(r"<loc>(https://www\.carwow\.co\.uk/[^<]+)</loc>", sub):
                     if is_valid_car_catalog_url(url):
-                        seen.add(url)
+                        # レビューページかチェック（新機能）
+                        if is_review_page(url):
+                            seen.add(url)
+                            print(f"✓ レビューページ: {url}")
+                        else:
+                            excluded.append(url)
+                            print(f"✗ 非レビューページ: {url}")
                     else:
                         pp = urlparse(url).path.strip('/').split('/')
                         if len(pp)==2 and pp[0] in KNOWN_MANUFACTURERS:
-                            excluded.append("/".join(pp))
+                            excluded.append(url)
             except Exception as e:
-                print("sitemap sub error:", e); continue
-        print(f"有効な車両カタログURL: {len(seen)}件")
+                print("sitemap sub error:", e)
+                continue
+        
+        print(f"\n有効なレビューページ: {len(seen)}件")
         if excluded:
-            print(f"除外されたURL: {len(excluded)}件\n除外例 (最初の10件):")
-            for x in excluded[:10]: print("  -", x)
+            print(f"除外されたURL: {len(excluded)}件")
+            print("除外例 (最初の10件):")
+            for x in excluded[:10]:
+                print(f"  - {x}")
+        
         return iter(sorted(seen))
     except Exception as e:
         print("サイトマップ取得エラー:", e)
         return iter([])
 
-# ─────────── 🆕 validate_supabase_payload() ───────────
+# ─────────── validate_supabase_payload ───────────
 def validate_supabase_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
     """transform で作った dict を最終検証（spec_json dict 対応版）"""
     errs:List[str] = []
@@ -169,11 +186,14 @@ def validate_supabase_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
 # ─────────── Supabase upsert ───────────
 def db_upsert(item: Dict[str, Any]):
     if not (SUPABASE_URL and SUPABASE_KEY):
-        print("SKIP Supabase:", item.get("slug")); return
+        print("SKIP Supabase:", item.get("slug"))
+        return
+    
     ok, msg = validate_supabase_payload(item)
     if not ok:
         print("VALIDATION ERROR:", msg)
-        print(json.dumps(item, indent=2, ensure_ascii=False)); return
+        print(json.dumps(item, indent=2, ensure_ascii=False))
+        return
 
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/cars",
@@ -194,7 +214,7 @@ def db_upsert(item: Dict[str, Any]):
 # ─────────── Main loop ───────────
 if __name__ == "__main__":
     urls = list(iter_model_urls())
-    print("Total target models:", len(urls))
+    print("Total target models (review pages only):", len(urls))
 
     DEBUG = os.getenv("DEBUG_MODE","false").lower()=="true"
     if DEBUG:
@@ -208,12 +228,14 @@ if __name__ == "__main__":
             raw      = scrape_one(url)
             payload  = to_payload(raw)
             db_upsert(payload)
-            if gsheets_upsert: gsheets_upsert(payload)
+            if gsheets_upsert: 
+                gsheets_upsert(payload)
             success += 1
         except Exception as e:
             print("[ERR]", url, repr(e))
             traceback.print_exc()
             failed += 1
-            if DEBUG and failed>=1: break
+            if DEBUG and failed>=1: 
+                break
 
     print(f"\nFinished: {success} success / {failed} error")
