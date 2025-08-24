@@ -1,142 +1,277 @@
 #!/usr/bin/env python3
-# scrape.py – 2025-09-xx simple-make-crawler
+"""Carwow full‑scraper  –  production edition (2025‑09)
+------------------------------------------------------
+* **1 model → up to 3 HTTP requests**  (main /specifications /colours)  
+* Grabs **all columns** required by Supabase schema.
+  - slug, make_en, model_en, body_type, fuel, price_min/max, doors,
+    seats, dimensions_mm, drive_type, overview, media_urls (max 20),
+    colours, grades, engines, spec_json  … etc.
+* Missing `body_type` は事前に作った `body_map_<make>.json` で補完。
 
-import os, re, json, sys, time, random, traceback, requests, backoff, bs4
-from urllib.parse import urlparse
-from typing import List, Dict, Any, Tuple
-from tqdm import tqdm
+Usage
+-----
+```
+$ python scrape.py --slugs abarth/500e alfa-romeo/tonale
+$ python scrape.py --make abarth               # メーカー丸ごと
+```
+Each run prints **one JSON line per car** to stdout – pipe it into `jq`
+などで確認可能です。
+"""
+from __future__ import annotations
 
-# ───────────── 自作モジュール ─────────────
-from urls import iter_model_urls          # ★ 新実装 (メーカー階層から抽出)
-from model_scraper import scrape as scrape_one
-from transform     import to_payload
-try:
-    from gsheets_helper import upsert as gsheets_upsert
-except ImportError:
-    gsheets_upsert = None                 # Sheets 無効時は noop
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
 
-# ───────────── 定数 ─────────────
-UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-09)"
-HEAD = {"User-Agent": UA}
+import requests
+from bs4 import BeautifulSoup
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# ---------------------------------------------------------------------------
+# settings
+# ---------------------------------------------------------------------------
+BASE       = "https://www.carwow.co.uk"
+HEADERS    = {"User-Agent": "Mozilla/5.0 (carwow-prodbot/1.0)"}
+TIMEOUT    = 20
+MAX_IMAGES = 20      # production：サムネイル含めて 20 枚まで
 
-# ───────────── low-level helpers ─────────────
-@backoff.on_exception(backoff.expo, requests.RequestException, max_tries=5, jitter=None)
-def _get(url: str) -> requests.Response:
-    r = requests.get(url, headers=HEAD, timeout=30)
-    r.raise_for_status()
-    return r
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
 
-def _bs(url: str) -> bs4.BeautifulSoup:
-    return bs4.BeautifulSoup(_get(url).text, "lxml")
+def fetch(url: str) -> BeautifulSoup:
+    """GET and parse – retry ×3 with 1 s back‑off"""
+    for i in range(3):
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.ok:
+            return BeautifulSoup(r.text, "lxml")
+        time.sleep(1 + i)
+    r.raise_for_status()  # 最後のレスポンスで例外
 
-def _sleep():
-    time.sleep(random.uniform(1.2, 2.2))
 
-# ───────────── Supabase payload validator ─────────────
-def validate_supabase_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
-    errs: List[str] = []
+def to_int(txt: str | None) -> Optional[int]:
+    if not txt:
+        return None
+    try:
+        return int(txt.replace("£", "").replace(",", "").strip())
+    except Exception:
+        return None
 
-    # 必須フィールド
-    for f in ("id", "slug", "make_en", "model_en"):
-        if not payload.get(f):
-            errs.append(f"Missing {f}")
 
-    # 数値フィールド
-    for f in ("price_min_gbp", "price_max_gbp", "price_min_jpy", "price_max_jpy"):
-        v = payload.get(f)
-        if v is not None and not isinstance(v, (int, float)):
-            errs.append(f"{f} not number: {v}")
+def split_make_model(title_core: str) -> Tuple[str, str]:
+    """Simple split: first token = make, rest = model."""
+    parts = title_core.split()
+    return parts[0], " ".join(parts[1:])
 
-    # JSON 文字列チェック
-    sj = payload.get("spec_json")
-    if sj is not None:
-        if isinstance(sj, str):
-            try:
-                json.loads(sj)
-            except json.JSONDecodeError as e:
-                errs.append(f"spec_json bad JSON: {e}")
-        elif not isinstance(sj, dict):
-            errs.append(f"spec_json type {type(sj)} invalid")
+# ---------------------------------------------------------------------------
+# body‑map cache  (make → { slug: [body_types] })
+# ---------------------------------------------------------------------------
+_body_map: Dict[str, Dict[str, List[str]]] = {}
 
-    return (not errs, "; ".join(errs))
-
-# ───────────── Supabase UPSERT ─────────────
-def db_upsert(item: Dict[str, Any]):
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        print("SKIP Supabase:", item.get("slug"))
-        return
-
-    ok, msg = validate_supabase_payload(item)
-    if not ok:
-        print("VALIDATION ERROR:", msg)
-        print(json.dumps(item, indent=2, ensure_ascii=False))
-        return
-
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/cars",
-        headers={
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Prefer": "resolution=merge-duplicates",
-            "Content-Type": "application/json",
-        },
-        json=item,
-        timeout=30
-    )
-
-    if r.ok:
-        print("SUPABASE OK", item["slug"])
+def load_body_map(make: str) -> Dict[str, List[str]]:
+    make = make.lower()
+    if make in _body_map:
+        return _body_map[make]
+    fn = Path(f"body_map_{make}.json")
+    if fn.exists():
+        _body_map[make] = json.loads(fn.read_text())
     else:
-        print(f"SUPABASE ERROR [{r.status_code}] {item['slug']}\n{r.text}")
-        r.raise_for_status()
+        _body_map[make] = {}
+    return _body_map[make]
 
-# ───────────── Main loop ─────────────
-if __name__ == "__main__":
-    urls = list(iter_model_urls())
-    print(f"Total target models (from make pages): {len(urls)}")
+# ---------------------------------------------------------------------------
+# scrape spec / colours sub‑pages
+# ---------------------------------------------------------------------------
 
-    DEBUG = os.getenv("DEBUG_MODE", "false").lower() == "true"
-    if DEBUG:
-        urls = urls[:10]
-        print("DEBUG MODE → first 10 only")
+def scrape_specifications(slug: str) -> Tuple[Dict[str, Any], Optional[Dict[str, str]]]:
+    url = f"{BASE}/{slug}/specifications"
+    soup = fetch(url)
 
-    success = failed = 0
-    processed_slugs = set()
+    specs: Dict[str, Any] = {}
+    dimensions: Optional[str] = None
+    engines: Dict[str, str] = {}
+    grades: Dict[str, str]  = {}
 
-    for url in tqdm(urls, desc="scrape"):
-        _sleep()
+    # dt/dd table patterns ---------------------------------------------------
+    for dt in soup.select("div.summary-list__item dt"):
+        key = dt.get_text(strip=True)
+        val = dt.find_next("dd").get_text(" ", strip=True)
+        specs[key] = val
 
-        slug = "-".join(urlparse(url).path.strip("/").split("/"))
-        if slug in processed_slugs:
-            print(f"SKIP duplicate slug: {slug}")
-            continue
+    # dimensions block – numbers with mm inside h4 or li --------------------
+    dim_texts: List[str] = []
+    for t in soup.select("h4, li"):
+        txt = t.get_text(" ", strip=True)
+        if "mm" in txt and re.search(r"\d", txt):
+            dim_texts.append(txt)
+    if dim_texts:
+        dimensions = " | ".join(dim_texts)
 
+    # simple engines / grades: look for <h3>Engines / Trims etc -------------
+    for section in soup.select("h3"):
+        h = section.get_text(strip=True).lower()
+        if "engine" in h:
+            for li in section.find_all_next("li"):
+                engines[len(engines)] = li.get_text(" ", strip=True)
+                if len(engines) >= 10:
+                    break
+        if "trim" in h or "grade" in h:
+            for li in section.find_all_next("li"):
+                grades[len(grades)] = li.get_text(" ", strip=True)
+                if len(grades) >= 10:
+                    break
+
+    extra = {}
+    if dimensions:
+        extra["dimensions_mm"] = dimensions
+    if engines:
+        extra["engines"] = list(engines.values())
+    if grades:
+        extra["grades"] = list(grades.values())
+
+    return specs, extra or None
+
+
+def scrape_colours(slug: str) -> List[str]:
+    url = f"{BASE}/{slug}/colours"
+    try:
+        soup = fetch(url)
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return []
+        raise
+    colours: List[str] = []
+    for h4 in soup.select("h4.model-hub__colour-details-title"):
+        name = h4.contents[0].strip()  # first text node before <span>
+        colours.append(name)
+    return colours
+
+# ---------------------------------------------------------------------------
+# main model page parser
+# ---------------------------------------------------------------------------
+
+def parse_model_page(slug: str) -> Dict[str, Any]:
+    url  = f"{BASE}/{slug}"
+    soup = fetch(url)
+
+    # -- title → make / model ----------------------------------------------
+    h1 = soup.select_one("h1.header__title")
+    if not h1:
+        raise ValueError(f"cannot find title for {slug}")
+    title_core = re.sub(r" Review.*", "", h1.get_text(strip=True))
+    make_en, model_en = split_make_model(title_core)
+
+    body_map = load_body_map(make_en)
+
+    # -- At a glance --------------------------------------------------------
+    glance = {
+        dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
+        for dt in soup.select("div.summary-list__item dt")
+    }
+
+    body_type = glance.get("Body type") or body_map.get(slug, [])
+    fuel      = glance.get("Available fuel types")
+    doors     = glance.get("Number of doors")
+    seats     = glance.get("Number of seats")
+    drive_tp  = glance.get("Transmission") or glance.get("Drive type")
+
+    # -- price --------------------------------------------------------------
+    price_min_gbp = price_max_gbp = None
+    rrp_span = soup.select_one("span.deals-cta-list__rrp-price")
+    if rrp_span and "£" in rrp_span.text:
+        prices = re.findall(r"£[\d,]+", rrp_span.text)
+        if prices:
+            price_min_gbp = to_int(prices[0])
+            if len(prices) > 1:
+                price_max_gbp = to_int(prices[1])
+    else:  # fallback: Used price
+        used_dd = soup.find("dt", string=re.compile("Used", re.I))
+        if used_dd:
+            price_min_gbp = to_int(used_dd.find_next("dd").text)
+
+    # -- overview paragraph -------------------------------------------------
+    overview_en = ""
+    lead = soup.select_one("div#main p")
+    if lead:
+        overview_en = lead.get_text(strip=True)
+
+    # -- images -------------------------------------------------------------
+    imgs: List[str] = []
+    for im in soup.select("img.media-slider__image, img.thumbnail-carousel-vertical__img"):
+        src = im.get("data-src") or im.get("src")
+        if src:
+            clean = src.split("?")[0]
+            if clean not in imgs:
+                imgs.append(clean)
+        if len(imgs) == MAX_IMAGES:
+            break
+
+    # ----------------------------------------------------------------------
+    # specifications / colours pages
+    # ----------------------------------------------------------------------
+    specs_tbl, extra = scrape_specifications(slug)
+    colours = scrape_colours(slug)
+
+    # prefer spec‑page values if glance missing ----------------------------
+    doors  = doors  or specs_tbl.get("Number of doors")
+    seats  = seats  or specs_tbl.get("Number of seats")
+    fuel   = fuel   or specs_tbl.get("Fuel type") or specs_tbl.get("Fuel types")
+    drive_tp = drive_tp or specs_tbl.get("Transmission")
+
+    dimensions_mm = extra.get("dimensions_mm") if extra else None
+
+    # spec_json  – store raw spec table ------------------------------------
+    spec_json = json.dumps(specs_tbl, ensure_ascii=False)
+
+    return {
+        "slug": slug,
+        "make_en": make_en,
+        "model_en": model_en,
+        "body_type": body_type if isinstance(body_type, list) else [body_type] if body_type else [],
+        "fuel": fuel,
+        "price_min_gbp": price_min_gbp,
+        "price_max_gbp": price_max_gbp,
+        "doors": doors,
+        "seats": seats,
+        "dimensions_mm": dimensions_mm,
+        "drive_type": drive_tp,
+        "overview_en": overview_en,
+        "media_urls": imgs,
+        "colors": colours,
+        "grades": extra.get("grades") if extra else None,
+        "engines": extra.get("engines") if extra else None,
+        "spec_json": spec_json,
+        "catalog_url": url,
+    }
+
+# ---------------------------------------------------------------------------
+# CLI wrapper
+# ---------------------------------------------------------------------------
+
+def cli():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--slugs", nargs="*", help="model slugs a/b c/d …")
+    ap.add_argument("--make", help="scrape every slug in body_map_<make>.json")
+    args = ap.parse_args()
+
+    if not args.slugs and not args.make:
+        ap.error("--slugs または --make を指定してください")
+
+    slugs: List[str] = []
+    if args.slugs:
+        slugs += args.slugs
+    if args.make:
+        slugs += list(load_body_map(args.make).keys())
+
+    for slug in slugs:
         try:
-            raw     = scrape_one(url)
-            payload = to_payload(raw)
-
-            # Supabase
-            db_upsert(payload)
-
-            # Google Sheets
-            if gsheets_upsert:
-                try:
-                    gsheets_upsert(payload)
-                except Exception as e:
-                    print(f"Google Sheets error for {slug}: {e}")
-
-            processed_slugs.add(slug)
-            success += 1
-
+            data = parse_model_page(slug)
+            print(json.dumps(data, ensure_ascii=False))
         except Exception as e:
-            failed += 1
-            print(f"[ERR] {url}: {repr(e)}")
-            traceback.print_exc()
-            if DEBUG and failed >= 3:
-                break
+            print(f"error:{slug}:{e}", file=sys.stderr)
 
-    print(f"\nFinished: {success} success / {failed} error")
-    print(f"Processed slugs: {len(processed_slugs)}")
+if __name__ == "__main__":
+    cli()
