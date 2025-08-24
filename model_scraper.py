@@ -1,164 +1,181 @@
 #!/usr/bin/env python3
-# model_scraper.py – 2025-08-30 full (画像スライダー優先 & 精度向上)
-
+# model_scraper.py ― 2025-09-01 gallery-only / 正式版
 import re, json, time, random, requests, bs4
 from urllib.parse import urljoin, urlparse
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-08-30)"
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-09-01)"
 HEAD = {"User-Agent": UA}
 
-# ───────── helpers ─────────
 def _get(url: str) -> requests.Response:
     r = requests.get(url, headers=HEAD, timeout=30)
     r.raise_for_status()
     return r
 
 def _bs(url: str) -> bs4.BeautifulSoup:
+    """URL → BeautifulSoup"""
     return bs4.BeautifulSoup(_get(url).text, "lxml")
 
-def _sleep(): time.sleep(random.uniform(0.6,1.1))
+def _sleep():
+    time.sleep(random.uniform(0.6, 1.1))
 
-# ───────── images ─────────
-EXCLUDE_IMG = ("logo","icon","badge","sprite","favicon","headshot")
+# ギャラリードメイン許可リスト
+_GALLERY_DOMAINS = (
+    "images.prismic.io",        # 新 CMS
+    "car-data.carwow.co.uk",    # 旧静止画 API
+)
 
-def _slider_imgs(doc:bs4.BeautifulSoup, limit:int=12) -> List[str]:
-    """ページ最上部スライダー画像を srcset / src から抽出"""
-    out=[]
-    for img in doc.select(".media-slider__image[src], .media-slider__image[srcset]"):
-        src = img.get("src") or ""
-        if not src and img.has_attr("srcset"):
-            src = img["srcset"].split()[0]
-        if src and not any(k in src.lower() for k in EXCLUDE_IMG):
-            if src.startswith("//"): src="https:"+src
-            out.append(src)
-        if len(out)>=limit: break
-    return list(dict.fromkeys(out))  # uniq
+def _gallery_imgs(doc: bs4.BeautifulSoup, base: str, limit: int = 20) -> List[str]:
+    """
+    1️⃣ ページ内の『ギャラリー / スライダー』画像だけを抽出  
+       ・class='media-slider__image'（srcset or src）  
+       ・縦サムネ : .thumbnail-carousel-vertical__img[data-src]  
+    2️⃣ 許可ドメインかどうかでホワイトリスト  
+    3️⃣ limit 枚で打ち切り
+    """
+    out: List[str] = []
 
-def _fallback_imgs(doc:bs4.BeautifulSoup, base:str, limit:int=12)->List[str]:
-    out=[]
-    for img in doc.select("img[src]"):
-        src=img["src"]
-        if any(k in src.lower() for k in EXCLUDE_IMG): continue
-        full=urljoin(base,src)
-        if full.startswith("http") and full not in out: out.append(full)
-        if len(out)>=limit: break
+    candidates = (
+        doc.select("img.media-slider__image[srcset]") +
+        doc.select("img.media-slider__image[src]") +
+        doc.select("img.thumbnail-carousel-vertical__img[data-src]")
+    )
+
+    for img in candidates:
+        src = img.get("srcset") or img.get("src") or img.get("data-src") or ""
+        # `srcset` は「URL 800w, URL 1600w …」の形式なので最高解像度を取る
+        if src and "," in src:
+            # 最高解像度の画像を選択（最後のエントリ）
+            src_parts = [part.strip().split()[0] for part in src.split(",")]
+            src = src_parts[-1] if src_parts else ""
+        else:
+            src = src.split()[0] if src else ""
+        
+        if not src:
+            continue
+            
+        full = urljoin(base, src)
+
+        # ホワイトリスト & 重複チェック & 有効URL確認
+        if (full.startswith(("http://", "https://")) and 
+            any(dom in full for dom in _GALLERY_DOMAINS) and 
+            full not in out):
+            out.append(full)
+            if len(out) >= limit:
+                break
     return out
 
-# ───────── private util ─────────
-def _summary(doc:bs4.BeautifulSoup,label:str)->str|None:
-    patt=re.compile(label,re.I)
-    node=doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
-    if node: return node.get_text(strip=True)
-    # fallback text search
-    for item in doc.select(".summary-list__item"):
-        dt=item.select_one("dt")
-        if dt and patt.search(dt.get_text(" ",strip=True)):
-            dd=item.select_one("dd")
-            if dd: return dd.get_text(strip=True)
-    return None
+def _safe_int(value: str) -> Optional[int]:
+    """文字列を安全にintに変換"""
+    if not value:
+        return None
+    # 数字のみ抽出
+    digits = re.sub(r'[^\d]', '', str(value))
+    return int(digits) if digits.isdigit() else None
 
-def _dimensions(spec:bs4.BeautifulSoup)->str|None:
-    # 1) SVG text
-    t=[t.get_text(strip=True) for t in spec.select("svg text") if "mm" in t.text][:3]
-    t=[re.sub(r"[^\d,]","",v) for v in t]
-    if len(t)==3: return " / ".join(t)
-    # 2) external dimensions block
-    m=re.search(r"External dimensions[^0-9]*(\d[\d,]+\s*mm)[^\d]+(\d[\d,]+\s*mm)[^\d]+(\d[\d,]+\s*mm)", spec.get_text(" ",strip=True), re.I)
-    if m: return " / ".join([m.group(i).replace(" ","") for i in (1,2,3)])
-    return None
+def scrape(url: str) -> Dict:
+    """車両モデルページ（例: …/bmw/5-series）→ dict"""
+    doc = _bs(url)
+    _sleep()
 
-# ───────── main ─────────
-def scrape(url:str)->Dict:
-    doc=_bs(url); _sleep()
-
-    # URL parts
-    make_raw, model_raw = urlparse(url).path.strip("/").split("/")[:2]
-    make_en  = make_raw.replace("-"," ").title()
-    model_en = model_raw.replace("-"," ").title()
+    # ── 基本 name / slug ──────────────────────────────
+    path_parts = urlparse(url).path.strip("/").split("/")
+    if len(path_parts) < 2:
+        raise ValueError(f"Invalid URL format: {url}")
+    
+    make_raw, model_raw = path_parts[:2]
+    make_en  = make_raw.replace("-", " ").title()
+    model_en = model_raw.replace("-", " ").title()
     slug     = f"{make_raw}-{model_raw}"
 
-    # title & price
-    title = doc.select_one("h1").get_text(" ",strip=True) if doc.select_one("h1") else f"{make_en} {model_en}"
-    m=re.search(r"£([\d,]+)\D+£([\d,]+)", doc.get_text(" ",strip=True))
-    pmin,pmax=(int(m[1].replace(",","")),int(m[2].replace(",",""))) if m else (None,None)
+    # ── タイトル & 価格帯 ─────────────────────────────
+    title_node = doc.select_one("h1")
+    title   = title_node.get_text(" ", strip=True) if title_node else f"{make_en} {model_en}"
 
-    # overview
-    overview = (doc.select_one("em") or {}).get_text(strip=True) if doc.select_one("em") else ""
+    price_m = re.search(r"£([\d,]+)\D+£([\d,]+)", doc.text)
+    pmin, pmax = (
+        (int(price_m[1].replace(",", "")), int(price_m[2].replace(",", "")))
+        if price_m else (None, None)
+    )
 
-    # body type / fuel
-    body_type=fuel=None
-    glance=doc.select_one(".review-overview__at-a-glance-model")
+    # ── 概要 ───────────────────────────────────────────
+    overview_node = doc.select_one("em")
+    overview = overview_node.get_text(strip=True) if overview_node else ""
+
+    # ── Body type / Fuel ──────────────────────────────
+    body_type, fuel = None, None
+    glance = doc.select_one(".review-overview__at-a-glance-model")
     if glance:
-        blocks=[b.get_text(strip=True) for b in glance.select("div")]
-        for k,v in zip(blocks[::2],blocks[1::2]):
-            if k.lower().startswith("body type"): body_type=[t.strip() for t in re.split(r",|/&",v) if t.strip()]
-            if k.lower().startswith("available fuel"): fuel="要確認" if v.lower()=="chooser" else v
+        cells = [c.get_text(strip=True) for c in glance.select("div")]
+        for k, v in zip(cells[::2], cells[1::2]):
+            if "Body type" in k:
+                body_type = [t.strip() for t in re.split(r",|/|&", v) if t.strip()]
+            elif "Available fuel" in k:
+                fuel = v if v.lower() != "chooser" else None
 
-    # seats / doors / trans (upper page)
-    doors=_summary(doc,"Number of doors")
-    seats=_summary(doc,"Number of seats")
-    trans=_summary(doc,"Transmission")
+    # ── Summary list ──────────────────────────────────
+    def _summary(label: str) -> Optional[str]:
+        node = doc.select_one(f".summary-list__item:has(dt:-soup-contains('{label}')) dd")
+        return node.get_text(strip=True) if node else None
 
-    # specs page
-    dims=grades=engines=None
-    spec_url=url.rstrip("/")+"/specifications"
+    doors = _summary("Number of doors")
+    seats = _summary("Number of seats")
+    trans = _summary("Transmission")
+
+    # Dimensions: SVG に embed されている mm 値 3 つを取得
+    dim_m = re.search(r"(\d{1,3}[,\d]*\s*mm)[^m]{0,30}(\d{1,3}[,\d]*\s*mm)[^m]{0,30}(\d{1,3}[,\d]*\s*mm)", doc.text)
+    dims  = " / ".join(dim_m.groups()) if dim_m else None
+
+    # ── Grades / Engines ─────────────────────────────
+    grades, engines = [], []
     try:
-        spec=_bs(spec_url); _sleep()
-        if not seats: seats=_summary(spec,"Number of seats")
-        if not doors: doors=_summary(spec,"Number of doors")
-        if not trans: trans=_summary(spec,"Transmission")
-        dims=_dimensions(spec)
-
-        grades=[g.get_text(strip=True) for g in spec.select("span.trim-article__title-part-2")] or None
-        engines=[]
+        spec_url = url.rstrip("/") + "/specifications"
+        spec = _bs(spec_url)
+        _sleep()
+        grades = [s.get_text(strip=True) for s in spec.select("span.trim-article__title-part-2")] or []
         for tr in spec.select("table tr"):
-            tds=[td.get_text(" ",strip=True) for td in tr.select("td")]
-            if len(tds)==2 and re.search(r"(PS|hp|kW|kWh|capacity)",tds[1],re.I):
-                engines.append(" – ".join(tds))
-        if not engines: engines=None
-    except Exception: pass
+            tds = [td.get_text(" ", strip=True) for td in tr.select("td")]
+            if len(tds) == 2 and re.search(r"(PS|hp|kW|kWh)", tds[1]):
+                engines.append(" ".join(tds))
+    except Exception:
+        pass
 
-    # colours page
-    colors=[]
+    # ── Colours ──────────────────────────────────────
+    colors = []
     try:
-        col=_bs(url.rstrip("/")+"/colours"); _sleep()
+        col_url = url.rstrip("/") + "/colours"
+        col = _bs(col_url)
+        _sleep()
         for h4 in col.select(".model-hub__colour-details-title"):
-            colors.append(h4.get_text(" ",strip=True).replace("  "," "))
-    except Exception: pass
+            color_text = h4.get_text(" ", strip=True)
+            if color_text:
+                colors.append(" ".join(color_text.split()))
+    except Exception:
+        pass
 
-    # media
-    media=_slider_imgs(doc)
-    if not media: media=_fallback_imgs(doc,url)
-
-    # numeric cast
-    doors_i=int(doors) if doors and doors.isdigit() else None
-    seats_i=int(seats) if seats and seats.isdigit() else None
-
+    # ── 返却 dict ────────────────────────────────────
     return {
-        "slug":slug,
-        "url":url,
-        "title":title,
-        "make_en":make_en,
-        "model_en":model_en,
-        "overview_en":overview,
-        "body_type":body_type,
-        "fuel":fuel,
-        "price_min_gbp":pmin,
-        "price_max_gbp":pmax,
-        "spec_json":{
-            "doors":doors,
-            "seats":seats,
-            "drive_type":trans,
-            "dimensions_mm":dims
-        },
-        "media_urls":media,
-        "doors":doors_i,
-        "seats":seats_i,
-        "dimensions_mm":dims,
-        "drive_type":trans,
-        "grades":grades,
-        "engines":engines,
-        "colors":colors or None,
-        "catalog_url":url,
+        "slug": slug,
+        "url": url,
+        "title": title,
+        "make_en": make_en,
+        "model_en": model_en,
+        "overview_en": overview,
+        "body_type": body_type,
+        "fuel": fuel,
+        "price_min_gbp": pmin,
+        "price_max_gbp": pmax,
+        "spec_json": json.dumps(
+            {"doors": doors, "seats": seats, "drive_type": trans, "dimensions_mm": dims},
+            ensure_ascii=False,
+        ),
+        "media_urls": _gallery_imgs(doc, url),
+        "doors": _safe_int(doors),
+        "seats": _safe_int(seats),
+        "dimensions_mm": dims,
+        "drive_type": trans,
+        "grades": grades or None,
+        "engines": engines or None,
+        "colors": colors or None,
+        "catalog_url": url,
     }
