@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Carwow full‑scraper  – production edition (2025‑09‑final‑r2)
+"""Carwow full‑scraper  – production edition (2025‑09‑final‑r4)
 ──────────────────────────────────────────────────────────────
 * **1 model ⇒ 最大 3 HTTP** (main /specifications /colours)
-* Supabase 用の全カラムを収集。
-* `body_map_<make>.json` がある場合は body_type を補完。
-* **引数ゼロなら**: カレントディレクトリに存在するすべての
-  `body_map_*.json` を巡回して *全車* を取得します。
+* Supabase / Google Sheets への **自動アップサート** を復活。
+* r3 での改善点はそのまま維持。（dimensions_mm の正規化 / body_map 補完
+  / At‑a‑glance 限定抽出 / 色名スラッグのスキップ など）
 
-主な修正 (r2)
---------------
-* **“/make/slug” 形式で URL を組み立てる** ─ 旧版は body_map に
-  ベアスラッグ (例 `q5`) が入っていると 404 になっていた。
-* CLI で body_map を展開する際、必ず `make/slug` を付与。
-* `parse_model_page()` 側でもセーフティ: もし 404 が返ったら
-  `/make/slug` を再試行（将来の手書きスラッグでも落ちない）。
+使い方
+------
+```
+$ python scrape.py --slugs abarth/500e alfa-romeo/tonale
+$ python scrape.py --make abarth              # body_map_abarth.json 全車
+$ python scrape.py                            # body_map_*.json を総当たり
+```
+実行ごとに **1 行 = 1 JSON** を `stdout` に出力しつつ、Supabase と
+（資格情報があれば）Google Sheets へ同じデータを upsert します。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -28,17 +30,31 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 
-# ---------------------------------------------------------------------------
-# settings
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+# settings & creds
+# ─────────────────────────────────────────────────────────────
 BASE       = "https://www.carwow.co.uk"
 HEADERS    = {"User-Agent": "Mozilla/5.0 (carwow-prodbot/1.0)"}
 TIMEOUT    = 20
 MAX_IMAGES = 20      # cap images at 20 / model
+SKIP_SLUGS = {
+    "lease", "news", "mpv", "automatic", "manual", "black", "white", "grey",
+    "green", "red", "blue", "yellow", "orange", "purple", "brown", "silver",
+}
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+# ― Supabase creds (set in GitHub Actions Secrets) ────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# ― Google Sheets helperはオプション ────────────────────
+try:
+    from gsheets_helper import upsert as gsheets_upsert  # type: ignore
+except ImportError:
+    gsheets_upsert = None
+
+# ─────────────────────────────────────────────────────────────
+# HTTP helpers
+# ─────────────────────────────────────────────────────────────
 
 def fetch(url: str) -> BeautifulSoup:
     """GET + parse with small retry back‑off"""
@@ -48,7 +64,7 @@ def fetch(url: str) -> BeautifulSoup:
             return BeautifulSoup(r.text, "lxml")
         if r.status_code == 404:
             raise requests.HTTPError(response=r)
-        time.sleep(1 + i)  # 1s, 2s
+        time.sleep(1 + i)
     r.raise_for_status()
 
 
@@ -65,10 +81,11 @@ def split_make_model(title_core: str) -> Tuple[str, str]:
     parts = title_core.split()
     return parts[0], " ".join(parts[1:])
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 # body‑map cache  (make → { slug: [body_types] })
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 _body_map: Dict[str, Dict[str, List[str]]] = {}
+
 
 def load_body_map(make: str) -> Dict[str, List[str]]:
     make = make.lower()
@@ -81,9 +98,9 @@ def load_body_map(make: str) -> Dict[str, List[str]]:
         _body_map[make] = {}
     return _body_map[make]
 
-# ---------------------------------------------------------------------------
-# scrape spec / colours sub‑pages
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+# spec / colours sub‑pages
+# ─────────────────────────────────────────────────────────────
 
 def scrape_specifications(slug: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     url = f"{BASE}/{slug}/specifications"
@@ -97,22 +114,23 @@ def scrape_specifications(slug: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     specs: Dict[str, Any] = {}
     extra: Dict[str, Any] = {}
 
-    # dt/dd pairs → raw spec table ----------------------------------------
-    for dt in soup.select("div.summary-list__item dt"):
+    # At‑a‑glance 正確抽出 --------------------------------------------------
+    for dt in soup.select("div.model-hub__summary-list dt"):
         key = dt.get_text(strip=True)
         val = dt.find_next("dd").get_text(" ", strip=True)
         specs[key] = val
 
-    # Dimensions (mm) ------------------------------------------------------
+    # Dimensions mm -------------------------------------------------------
+    dim_pat = re.compile(r"\b\d{3,4}\s?mm\b")
     dims: List[str] = []
     for t in soup.select("h4, li"):
         txt = t.get_text(" ", strip=True)
-        if "mm" in txt and re.search(r"\d", txt):
+        if dim_pat.search(txt):
             dims.append(txt)
     if dims:
         extra["dimensions_mm"] = " | ".join(dims)
 
-    # Engines / Trims ------------------------------------------------------
+    # Engines / Trims -----------------------------------------------------
     for h3 in soup.select("h3"):
         h = h3.get_text(strip=True).lower()
         if "engine" in h:
@@ -133,26 +151,27 @@ def scrape_colours(slug: str) -> List[str]:
         raise
     return [h4.contents[0].strip() for h4 in soup.select("h4.model-hub__colour-details-title")]
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 # main model page parser
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 
-def try_fetch_model(slug: str, make_hint: Optional[str] = None) -> BeautifulSoup:
+def try_fetch_model(slug: str, make_hint: Optional[str] = None) -> Tuple[BeautifulSoup, str]:
     """Fetch /slug ; on 404 retry /make/slug (if make provided)."""
     try:
-        return fetch(f"{BASE}/{slug}")
+        soup = fetch(f"{BASE}/{slug}")
+        return soup, slug
     except requests.HTTPError as e:
         if e.response.status_code == 404 and make_hint and "/" not in slug:
-            # retry with make prefix
-            return fetch(f"{BASE}/{make_hint}/{slug}")
+            path = f"{make_hint}/{slug}"
+            soup = fetch(f"{BASE}/{path}")
+            return soup, path
         raise
 
 
 def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, Any]:
-    soup = try_fetch_model(slug, make_hint)
-    final_url_path = soup.find("link", rel="canonical").get("href", "").replace(BASE + "/", "") or slug
+    soup, path = try_fetch_model(slug, make_hint)
 
-    # title → make / model -------------------------------------------------
+    # title ---------------------------------------------------------------
     h1 = soup.select_one("h1.header__title")
     if not h1:
         raise ValueError(f"no title for {slug}")
@@ -161,17 +180,18 @@ def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, An
 
     body_map = load_body_map(make_en)
 
-    # At a glance ----------------------------------------------------------
+    # At‑a‑glance ---------------------------------------------------------
     glance = {dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
-              for dt in soup.select("div.summary-list__item dt")}
+              for dt in soup.select("div.model-hub__summary-list dt")}
 
-    body_type = glance.get("Body type") or body_map.get(final_url_path, [])
+    body_type = glance.get("Body type") or \
+                body_map.get(path) or body_map.get(path.split("/")[-1], [])
     fuel      = glance.get("Available fuel types")
     doors     = glance.get("Number of doors")
     seats     = glance.get("Number of seats")
     drive_tp  = glance.get("Transmission") or glance.get("Drive type")
 
-    # price ----------------------------------------------------------------
+    # price ---------------------------------------------------------------
     price_min_gbp = price_max_gbp = None
     rrp = soup.select_one("span.deals-cta-list__rrp-price")
     if rrp and "£" in rrp.text:
@@ -185,11 +205,11 @@ def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, An
         if used_dd:
             price_min_gbp = to_int(used_dd.find_next("dd").text)
 
-    # overview -------------------------------------------------------------
+    # overview ------------------------------------------------------------
     lead = soup.select_one("div#main p")
     overview_en = lead.get_text(strip=True) if lead else ""
 
-    # images ---------------------------------------------------------------
+    # images --------------------------------------------------------------
     imgs: List[str] = []
     for im in soup.select("img.media-slider__image, img.thumbnail-carousel-vertical__img"):
         src = im.get("data-src") or im.get("src")
@@ -200,22 +220,21 @@ def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, An
         if len(imgs) == MAX_IMAGES:
             break
 
-    # specs / colours ------------------------------------------------------
-    spec_tbl, extra = scrape_specifications(final_url_path)
-    colours = scrape_colours(final_url_path)
+    # specs / colours -----------------------------------------------------
+    spec_tbl, extra = scrape_specifications(path)
+    colours = scrape_colours(path)
 
-    # fallback enrich ------------------------------------------------------
+    # fallback enrich -----------------------------------------------------
     doors  = doors  or spec_tbl.get("Number of doors")
     seats  = seats  or spec_tbl.get("Number of seats")
     fuel   = fuel   or spec_tbl.get("Fuel type") or spec_tbl.get("Fuel types")
     drive_tp = drive_tp or spec_tbl.get("Transmission")
     dimensions_mm = extra.get("dimensions_mm") if extra else None
 
-    # serialise raw spec table --------------------------------------------
     spec_json = json.dumps(spec_tbl, ensure_ascii=False)
 
     return {
-        "slug": final_url_path,
+        "slug": path,
         "make_en": make_en,
         "model_en": model_en,
         "body_type": body_type if isinstance(body_type, list) else ([body_type] if body_type else []),
@@ -232,25 +251,62 @@ def parse_model_page(slug: str, make_hint: Optional[str] = None) -> Dict[str, An
         "grades": extra.get("grades") if extra else None,
         "engines": extra.get("engines") if extra else None,
         "spec_json": spec_json,
-        "catalog_url": f"{BASE}/{final_url_path}",
+        "catalog_url": f"{BASE}/{path}",
     }
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+# Supabase / Sheets helpers – 復活分
+# ─────────────────────────────────────────────────────────────
+
+def validate_supabase_payload(item: Dict[str, Any]) -> Tuple[bool, str]:
+    errs: List[str] = []
+    for f in ("slug", "make_en", "model_en"):
+        if not item.get(f):
+            errs.append(f"missing {f}")
+    for f in ("price_min_gbp", "price_max_gbp"):
+        v = item.get(f)
+        if v is not None and not isinstance(v, (int, float)):
+            errs.append(f"{f} not number")
+    if errs:
+        return False, "; ".join(errs)
+    return True, ""
+
+
+def db_upsert(item: Dict[str, Any]):
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return  # creds not set – skip silently
+    ok, msg = validate_supabase_payload(item)
+    if not ok:
+        print(f"validation error:{item['slug']}: {msg}", file=sys.stderr)
+        return
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/cars",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Prefer": "resolution=merge-duplicates",
+            "Content-Type": "application/json",
+        },
+        json=item,
+        timeout=30,
+    )
+    if not r.ok:
+        print(f"supabase error:{item['slug']}: [{r.status_code}] {r.text}", file=sys.stderr)
+
+# ─────────────────────────────────────────────────────────────
 # CLI
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
 
 def discover_all_body_maps() -> List[str]:
     return [p.stem.replace("body_map_", "") for p in Path(".").glob("body_map_*.json")]
 
 
 def expand_slugs(make: str, inner_slugs: List[str]) -> List[str]:
-    """Prefix bare slugs with make/ for correct URL path."""
     out: List[str] = []
     for s in inner_slugs:
-        if "/" in s:
-            out.append(s)
-        else:
-            out.append(f"{make}/{s}")
+        if s in SKIP_SLUGS:
+            continue
+        out.append(s if "/" in s else f"{make}/{s}")
     return out
 
 
@@ -261,9 +317,8 @@ def cli():
     args = ap.parse_args()
 
     slugs: List[str] = []
-
     if args.slugs:
-        slugs += args.slugs
+        slugs += [s for s in args.slugs if s.split("/")[-1] not in SKIP_SLUGS]
     if args.make:
         bm = load_body_map(args.make)
         slugs += expand_slugs(args.make, list(bm.keys()))
@@ -284,7 +339,16 @@ def cli():
             make_hint = slug.split("/")[0] if "/" in slug else None
             data = parse_model_page(slug, make_hint)
             print(json.dumps(data, ensure_ascii=False))
-        except Exception as e:
+
+            # ─ upsert to external stores ─
+            db_upsert(data)
+            if gsheets_upsert:
+                try:
+                    gsheets_upsert(data)  # type: ignore[arg-type]
+                except Exception as e:  # pylint:disable=broad-except
+                    print(f"gsheets error:{slug}:{e}", file=sys.stderr)
+
+        except Exception as e:  # pylint:disable=broad-except
             print(f"error:{slug}:{e}", file=sys.stderr)
 
 if __name__ == "__main__":
