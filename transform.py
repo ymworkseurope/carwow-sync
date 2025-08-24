@@ -1,51 +1,94 @@
 #!/usr/bin/env python3
 # transform.py – 2025-08-30 full (和訳テーブル拡充 + drive_type_ja)
-
 import os, uuid, json, requests
 from datetime import datetime
 from typing import Dict, Any
 
-# ───────── 設定 ─────────
 GBP_TO_JPY = float(os.getenv("GBP_TO_JPY", "195"))
-DEEPL_KEY  = os.getenv("DEEPL_KEY", "")          # 空＝翻訳スキップ
+DEEPL_KEY  = os.getenv("DEEPL_KEY", "")
 
-# ───────── グロッサリー ─────────
 BODY_TYPE_JA = {
     "Small cars":             "小型車",
     "Sports cars":            "スポーツカー",
     "Hybrid & electric cars": "ハイブリッド・EV",
-    "Convertibles":           "オープンカー",
+    "Convertibles":           "カブリオレ",
     "SUVs":                   "SUV",
     "Hot hatches":            "ホットハッチ",
     "Hatchbacks":             "ハッチバック",
-    "Camper vans":            "キャンピングカー",     # ★追加
-    "Coupes":                 "クーペ",               # ★追加
-    "Saloons":                "セダン",               # ★追加
+    "Camper vans":            "キャンピングカー",
+    "Coupes":                 "クーペ",
+    "Saloons":                "セダン",
+    "Estate cars":            "ステーションワゴン",
+    "People carriers":        "ミニバン",
+    "Electric vans":          "電気バン",
 }
 
 MAKE_JA = {
     # 既存
     "Abarth":"アバルト", "Audi":"アウディ", "Ford":"フォード", "Honda":"ホンダ",
-    "Mercedes":"メルセデス", "Volkswagen":"フォルクスワーゲン",
-    "Toyota":"トヨタ",
-    # 英語そのまま表記
-    "BMW":"BMW", "MINI":"MINI",
-    # ★追加分
+    "Mercedes":"メルセデス・ベンツ", "Volkswagen":"フォルクスワーゲン",
+    "Toyota":"トヨタ", "BMW":"BMW", "MINI":"MINI",
+    # 追加分（翻訳されてないワード）
+    "Alfa Romeo":"アルファロメオ",
     "Alpine":"アルピーヌ",
     "BYD":"BYD",
+    "Byd":"BYD",
+    "Bmw":"BMW",
+    "Citroen":"シトロエン",
+    "Cupra":"クプラ",
+    "Dacia":"ダチア",
     "DS":"DS",
+    "Ds":"DS",
+    "Fiat":"フィアット",
     "Genesis":"ジェネシス",
     "GWM":"GWM",
+    "Gwm":"GWM",
+    "Hyundai":"ヒュンダイ",
     "Jeep":"ジープ",
+    "Kia":"キア",
     "Land Rover":"ランドローバー",
     "Lexus":"レクサス",
     "Lotus":"ロータス",
+    "Mazda":"マツダ",
     "MG":"MG",
+    "Mg":"MG",
+    "Mini":"MINI",
+    "Nissan":"日産",
+    "Peugeot":"プジョー",
+    "Polestar":"ポールスター",
+    "Renault":"ルノー",
     "Seat":"セアト",
+    "Skoda":"シュコダ",
     "Smart":"スマート",
     "Subaru":"スバル",
+    "Suzuki":"スズキ",
+    "Tesla":"テスラ",
     "Vauxhall":"ボクスホール",
-    "Xpeng":"シャオペン",
+    "Volvo":"ボルボ",
+    "Xpeng":"エクスペン",
+    # 参考リストから主要ブランド追加
+    "Aston Martin":"アストンマーチン",
+    "Bentley":"ベントレー",
+    "Ferrari":"フェラーリ",
+    "Jaguar":"ジャガー",
+    "Lamborghini":"ランボルギーニ",
+    "Lancia":"ランチア",
+    "Maserati":"マセラティ",
+    "McLaren":"マクラーレン",
+    "Porsche":"ポルシェ",
+    "Rolls-Royce":"ロールスロイス",
+    "Saab":"サーブ",
+    "Infiniti":"インフィニティ",
+    "Mitsubishi":"三菱",
+    "Isuzu":"いすゞ",
+    "Daihatsu":"ダイハツ",
+    "Cadillac":"キャデラック",
+    "Chevrolet":"シボレー",
+    "Chrysler":"クライスラー",
+    "Dodge":"ダッジ",
+    "Buick":"ビュイック",
+    "GMC":"GMC",
+    "Lincoln":"リンカーン",
 }
 
 DRIVE_TYPE_JA = {
@@ -55,10 +98,8 @@ DRIVE_TYPE_JA = {
     "Electric":"EV",
     "Semi-automatic":"AT",
     "Tiptronic":"AT",
-    # 追加時はここに
 }
 
-# ───────── util ─────────
 def uuidv5(slug: str) -> str:
     ns = uuid.UUID("12345678-1234-5678-1234-123456789012")
     return str(uuid.uuid5(ns, slug))
@@ -75,14 +116,15 @@ def deepl(text: str) -> str:
     )
     return r.json()["translations"][0]["text"]
 
-def t_body(bt_en: str) -> str:   return BODY_TYPE_JA.get(bt_en, bt_en)
-def t_drive(dt_en: str) -> str:  return DRIVE_TYPE_JA.get(dt_en, dt_en)
+def t_body(bt_en: str) -> str:   
+    return BODY_TYPE_JA.get(bt_en, bt_en)
 
-# ───────── main ─────────
+def t_drive(dt_en: str) -> str:  
+    return DRIVE_TYPE_JA.get(dt_en, dt_en)
+
 def to_payload(raw: Dict[str,Any]) -> Dict[str,Any]:
     body_en  = raw.get("body_type") or []
     drive_en = raw.get("drive_type") or ""
-
     payload = {
         "id":           uuidv5(raw["slug"]),
         "slug":         raw["slug"],
@@ -105,7 +147,7 @@ def to_payload(raw: Dict[str,Any]) -> Dict[str,Any]:
         "seats":        raw.get("seats"),
         "dimensions_mm":raw.get("dimensions_mm"),
         "drive_type":   drive_en,
-        "drive_type_ja":t_drive(drive_en),              # ★新規
+        "drive_type_ja":t_drive(drive_en),
         "grades":       raw.get("grades"),
         "engines":      raw.get("engines"),
         "colors":       raw.get("colors"),
