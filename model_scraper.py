@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
-# model_scraper.py – 2025-09-xx json-ld + slug-fix
-
+# coding: utf-8
 """
-単一モデルページを解析し:
-  * slug / make / model
-  * 価格・ボディタイプ・燃料・画像
-を dict で返す。
+Carwow model scraper – 2025-09 update
 """
 
-import re, json, time, random, requests, bs4
+from __future__ import annotations
+import re, json, requests, bs4, time, random
 from urllib.parse import urljoin, urlparse
 from typing import Dict, List, Optional
 
-UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync 2025-09)"
+UA   = "Mozilla/5.0 (+https://github.com/ymworkseurope/carwow-sync)"
 HEAD = {"User-Agent": UA}
+_DOMAINS = ("images.prismic.io", "car-data.carwow.co.uk")
 
-# ───────────── HTTP helpers
-def _get(url: str) -> requests.Response:
+# ─────────── helpers ───────────
+def _get(url: str) -> bs4.BeautifulSoup:
     r = requests.get(url, headers=HEAD, timeout=30)
     r.raise_for_status()
-    return r
+    return bs4.BeautifulSoup(r.text, "lxml")
 
-def _bs(url: str) -> bs4.BeautifulSoup:
-    return bs4.BeautifulSoup(_get(url).text, "lxml")
+def _sleep(): time.sleep(random.uniform(.4, .8))
 
-def _sleep(): time.sleep(random.uniform(0.6, 1.2))
+def _safe_int(txt: str | None) -> Optional[int]:
+    s = re.sub(r"[^\d]", "", txt or "")
+    return int(s) if s else None
 
-# ───────────── JSON-LD 抽出
+# ─────────── JSON-LD ───────────
 def _jsonld(doc: bs4.BeautifulSoup) -> dict:
     for s in doc.select('script[type="application/ld+json"]'):
         try:
@@ -37,98 +36,202 @@ def _jsonld(doc: bs4.BeautifulSoup) -> dict:
             pass
     return {}
 
-# ───────────── 画像
-_GALLERY_DOMAINS = ("images.prismic.io", "car-data.carwow.co.uk")
+# ─────────── key/value maps ───────────
+def _dtdd_pairs(doc: bs4.BeautifulSoup) -> dict:
+    out = {}
+    for dt in doc.select("dt"):
+        dd = dt.find_next("dd")
+        if dd:
+            out[dt.get_text(" ", strip=True).lower()] = dd.get_text(" ", strip=True)
+    return out
 
-def _gallery_imgs(doc: bs4.BeautifulSoup, base: str, limit: int = 20) -> List[str]:
-    imgs = doc.select("img[srcset], img[src]")
-    out: List[str] = []
-    for img in imgs:
-        src = img.get("srcset") or img.get("src") or ""
+def _at_a_glance(doc: bs4.BeautifulSoup) -> dict:
+    out = {}
+    for blk in doc.select(".review-overview__at-a-glance-model"):
+        cells = [c.get_text(" ", strip=True) for c in blk.select("div")]
+        for k, v in zip(cells[::2], cells[1::2]):
+            out[k.lower()] = v
+    return out
+
+def _pick(keys: list[str], *sources: dict) -> Optional[str]:
+    for key in keys:
+        for src in sources:
+            if key in src and src[key]:
+                return src[key]
+    return None
+
+# ─────────── price ───────────
+def _prices(doc: bs4.BeautifulSoup, kv: dict) -> tuple[Optional[int], Optional[int]]:
+    # 1) RRP
+    rrp = doc.select_one(".deals-cta-list__rrp-price")
+    if rrp:
+        nums = [int(x.replace(",", "")) for x in re.findall(r"£([\d,]+)", rrp.text)]
+        if nums:
+            return (nums[0], nums[-1] if len(nums) > 1 else None)
+
+    # 2) Used only
+    used = kv.get("used")
+    if used:
+        return (_safe_int(used), None)
+
+    # fallback = None
+    return (None, None)
+
+# ─────────── images ───────────
+def _hires(url: str) -> str:
+    base = url.split("?")[0]
+    return f"{base}?auto=format&fit=max&q=80"
+
+def _gallery(doc: bs4.BeautifulSoup, base: str, limit: int = 20) -> List[str]:
+    urls: List[str] = []
+    # main slider / generic imgs
+    for tag in doc.select("img[data-srcset], source[data-srcset], img[srcset], img[src]"):
+        src = (
+            tag.get("data-srcset") or tag.get("srcset") or
+            tag.get("data-src") or tag.get("src") or ""
+        )
         if "," in src:
             src = src.split(",")[-1].split()[0]
         full = urljoin(base, src)
-        if any(dom in full for dom in _GALLERY_DOMAINS) and full not in out:
-            out.append(full)
-            if len(out) >= limit:
-                break
+        if any(dom in full for dom in _DOMAINS):
+            h = _hires(full)
+            if h not in urls:
+                urls.append(h)
+        if len(urls) >= limit:
+            return urls
+    # thumbnail carousel
+    for img in doc.select(".thumbnail-carousel-vertical__img"):
+        src = img.get("data-src") or img.get("src") or ""
+        full = urljoin(base, src)
+        if any(dom in full for dom in _DOMAINS):
+            h = _hires(full)
+            if h not in urls:
+                urls.append(h)
+        if len(urls) >= limit:
+            break
+    return urls[:limit]
+
+# ─────────── make / model from H1 ───────────
+def _split_make_model(title: str, make_slug: str) -> tuple[str, str]:
+    title = re.sub(r"(?i)review.*$", "", title).strip()
+    title = re.sub(r"(?i)& prices.*$", "", title).strip()
+    tk = make_slug.split("-")
+    parts = title.split()
+    make = " ".join(parts[:len(tk)])
+    model = " ".join(parts[len(tk):]).strip() or make
+    return make, model
+
+# ─────────── /colours page ───────────
+def _colors(base_url: str) -> List[str]:
+    try:
+        doc = _get(f"{base_url}/colours")
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return []
+        raise
+    out = []
+    for h4 in doc.select("h4.model-hub__colour-details-title"):
+        txt = h4.get_text(" ", strip=True)
+        name = txt.split(" - ")[0].strip()
+        if name and name not in out:
+            out.append(name)
     return out
 
-def _safe_int(val: str | None) -> Optional[int]:
-    if val and val.isdigit():
-        return int(val)
-    return None
+# ─────────── /specifications page ───────────
+_DIMS_RE = re.compile(r"(\d{3,4})\s?mm", re.I)
 
-# ───────────── main
+def _spec_page(base_url: str) -> dict:
+    try:
+        doc = _get(f"{base_url}/specifications")
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return {}
+        raise
+    kv = _dtdd_pairs(doc)
+    # external dimensions: 最初の 3 つ mm を length/width/height と仮定
+    dims = _DIMS_RE.findall(doc.text)
+    if len(dims) >= 3:
+        kv["length_mm"], kv["width_mm"], kv["height_mm"] = dims[:3]
+    if m := re.search(r"wheelbase\s+([\d\.]+)\s?m", doc.text, re.I):
+        kv["wheelbase_m"] = m.group(1)
+    if m := re.search(r"turning circle\s+([\d\.]+)\s?m", doc.text, re.I):
+        kv["turning_circle_m"] = m.group(1)
+    if m := re.search(r"boot\s+\(seats up\)\s+(\d+)\s?l", doc.text, re.I):
+        kv["boot_up_l"] = m.group(1)
+    if m := re.search(r"boot\s+\(seats down\)\s+(\d+)\s?l", doc.text, re.I):
+        kv["boot_down_l"] = m.group(1)
+    return kv
+
+# ─────────── main ───────────
 def scrape(url: str) -> Dict:
-    doc  = _bs(url)
-    data = _jsonld(doc)
+    doc  = _get(url)
+    ld   = _jsonld(doc)
     _sleep()
 
     make_slug, model_slug = urlparse(url).path.strip("/").split("/")[:2]
+    slug = f"{make_slug}-{model_slug}"
 
-    # slug は make が重複していれば除去
-    slug = (model_slug if model_slug.startswith(make_slug + "-")
-            else f"{make_slug}-{model_slug}")
+    title = (doc.select_one("h1") or bs4.Tag()).get_text(" ", strip=True)
+    make_en, model_en = _split_make_model(title, make_slug)
 
-    make_en  = data.get("brand", {}).get("name") or make_slug.title()
-    model_en = data.get("name") or model_slug.replace("-", " ").title()
+    kv_glance  = _at_a_glance(doc)
+    kv_summary = _dtdd_pairs(doc)
+    kv_all     = {**kv_glance, **kv_summary}
 
-    # ボディタイプ・燃料
-    body_type = data.get("bodyType") or []
-    if isinstance(body_type, str):
-        body_type = [body_type]
-    fuel = data.get("fuelType")
+    price_min, price_max = _prices(doc, kv_all)
 
-    # 価格
-    pmin = pmax = None
-    if "offers" in data:
-        price_spec = data["offers"].get("priceSpecification", {})
-        pmin = price_spec.get("minPrice") or price_spec.get("price")
-        pmax = price_spec.get("maxPrice")
-        if isinstance(pmin, str): pmin = int(pmin)
-        if isinstance(pmax, str): pmax = int(pmax)
+    body_type = ld.get("bodyType") or _pick(["body type", "body"], kv_all)
+    body_list = [b.strip() for b in (body_type if isinstance(body_type, list)
+                                     else [body_type] if body_type else []) if b]
 
-    # ドア・シート・駆動
-    doors = data.get("numberOfDoors")
-    seats = data.get("numberOfSeats")
-    drive = data.get("vehicleTransmission")
+    fuel  = ld.get("fuelType") or _pick(["fuel type", "available fuel"], kv_all)
+    doors = ld.get("numberofdoors") or _pick(["number of doors", "doors"], kv_all)
+    seats = ld.get("numberofseats") or _pick(["number of seats", "seats"], kv_all)
+    drive = ld.get("vehicleTransmission") or _pick(["transmission", "drive type"], kv_all)
 
-    # 寸法（mm）
     dims = None
-    if "height" in data and "width" in data and "length" in data:
-        dims = f"{data['length']} / {data['width']} / {data['height']}"
+    if all(k in ld for k in ("length", "width", "height")):
+        dims = f"{ld['length']} / {ld['width']} / {ld['height']}"
+    else:
+        mm = re.findall(r"(\d{3,4}\s?mm)", doc.text)
+        if len(mm) >= 3:
+            dims = " / ".join(mm[:3])
 
-    # 概要文（旧 <em> タグフォールバック）
-    overview = data.get("description") or (doc.select_one("em") or bs4.Tag()).get_text(strip=True)
+    overview = ld.get("description") or (doc.select_one("em") or bs4.Tag()).get_text(" ", strip=True)
+
+    base_url = f"https://{urlparse(url).netloc}/{make_slug}/{model_slug}"
+    colours  = _colors(base_url)
+    spec_ext = _spec_page(base_url)
+
+    spec_json = {
+        "doors": doors,
+        "seats": seats,
+        "drive_type": drive,
+        "dimensions_mm": dims,
+        **spec_ext,
+    }
 
     return {
+        # ─── primary
         "slug": slug,
-        "url": url,
-        "title": f"{make_en} {model_en}",
+        "catalog_url": url,
         "make_en": make_en,
         "model_en": model_en,
         "overview_en": overview,
-        "body_type": body_type,
+        "body_type": body_list,
         "fuel": fuel,
-        "price_min_gbp": pmin,
-        "price_max_gbp": pmax,
-        "spec_json": json.dumps(
-            {
-                "doors": doors,
-                "seats": seats,
-                "drive_type": drive,
-                "dimensions_mm": dims,
-            },
-            ensure_ascii=False,
-        ),
-        "media_urls": _gallery_imgs(doc, url),
+        "price_min_gbp": price_min,
+        "price_max_gbp": price_max,
+        # ─── detailed specs
+        "spec_json": json.dumps(spec_json, ensure_ascii=False),
+        "media_urls": _gallery(doc, url, 20),
         "doors": _safe_int(str(doors) if doors else None),
         "seats": _safe_int(str(seats) if seats else None),
         "dimensions_mm": dims,
         "drive_type": drive,
+        # ─── extra
+        "colors": colours,
         "grades": None,
         "engines": None,
-        "colors": None,
-        "catalog_url": url,
+        # transform.py で *_ja 系 / JPY 換算 / updated_at などを付与
     }
