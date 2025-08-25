@@ -20,7 +20,7 @@ jobs:
       # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 将来用
       GBP_TO_JPY:     "195"
       DEBUG_MODE:     "false"           # 本番: false, テスト: true
-      MAKES_FOR_BODYMAP: "abarth alfa-romeo audi bmw mercedes volkswagen"  # 主要メーカー
+      MAKES_FOR_BODYMAP: ""  # 主要メーカー
     
     steps:
       # ① ソース取得
