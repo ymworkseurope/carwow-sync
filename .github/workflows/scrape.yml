@@ -2,14 +2,14 @@ name: Daily Carwow Sync
 
 on:
   schedule:
-    # 日本時間 AM 2:00 = UTC 17:00 (前日)
+    # 日本時間 AM2:00（UTC 17:00 前日）
     - cron: '0 17 * * *'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # タイムアウト設定
+    timeout-minutes: 180   # メーカー数が増えるので少し余裕を持たせる
 
     env:
       SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
@@ -17,73 +17,80 @@ jobs:
       DEEPL_KEY:      ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
-      # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 将来用
       GBP_TO_JPY:     "195"
-      DEBUG_MODE:     "false"           # 本番: false, テスト: true
-      MAKES_FOR_BODYMAP: "abarth alfa-romeo audi bmw mercedes volkswagen"  # 主要メーカー
+      DEBUG_MODE:     "false"
+      MAKES_FOR_BODYMAP: ""      # ここは実行時に自動上書きされる
 
     steps:
-      # ① ソース取得
-      - name: Checkout code
-        uses: actions/checkout@v4
+    # 1. リポジトリ取得
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      # ② Python 3.11 セットアップ
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'  # pip キャッシュを有効化
+    # 2. Python
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
 
-      # ③ 依存パッケージインストール
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    # 3. 依存インストール
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      # ④ Chrome/ChromeDriver セットアップ（Selenium用）
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@latest
-      - name: Setup ChromeDriver
-        uses: nanasess/setup-chromedriver@v2
+    # 4. Chrome & driver
+    - name: Setup Chrome
+      uses: browser-actions/setup-chrome@latest
+    - name: Setup ChromeDriver
+      uses: nanasess/setup-chromedriver@v2
 
-      # ⑤ Google サービスアカウント JSON をファイル化
-      - name: Setup Google credentials
-        if: env.GS_CREDS_JSON != ''
-        run: |
-          mkdir -p secrets
-          echo "$GS_CREDS_JSON" > secrets/gs_creds.json
+    # 5. Google SA JSON
+    - name: Setup Google credentials
+      if: env.GS_CREDS_JSON != ''
+      run: |
+        mkdir -p secrets
+        echo "$GS_CREDS_JSON" > secrets/gs_creds.json
 
-      # ⑥ メーカーごとに body_type マップ生成（Selenium使用）
-      - name: Build body_type maps
-        run: |
-          IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
-          for make in "${MAKES[@]}"; do
-            echo "▶ Building body map for ${make}..."
-            python body_type_mapper.py "${make}" || echo "Failed for ${make}, continuing..."
-          done
+    # 6. 🔍 **全メーカーを自動取得**
+    - name: Discover all makers
+      id: makers
+      run: |
+        echo "📡  Fetching maker list"
+        python scripts/auto_maker_scraper.py > makers.txt
+        MAKERS=$(grep '^MAKES_FOR_BODYMAP:' makers.txt | cut -d'"' -f2)
+        echo "MAKES_FOR_BODYMAP=$MAKERS" >> "$GITHUB_ENV"
+        echo "Detected makers: $MAKERS"
 
-      # ⑦ メインクローラー実行
-      - name: Run main crawler
-        run: |
-          echo "Starting crawler at $(date)"
-          python scrape.py
-          echo "Crawler finished at $(date)"
+    # 7. body_type マップ生成
+    - name: Build body_type maps
+      run: |
+        IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
+        for make in "${MAKES[@]}"; do
+          echo "▶ Building body map for ${make}..."
+          python body_type_mapper.py "${make}" || echo "Failed for ${make}, continuing..."
+        done
 
-      # ⑧ 実行ログを artifact に保存
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: crawler-logs-${{ github.run_number }}
-          path: |
-            *.log
-            *.jsonl
-            body_map_*.json
-          retention-days: 7
+    # 8. メインクローラー
+    - name: Run main crawler
+      run: |
+        echo "Starting crawler at $(date)"
+        python scrape.py
+        echo "Crawler finished at $(date)"
 
-      # ⑨ エラー時の通知（オプション）
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "Crawler failed. Check the logs for details."
-          # ここにSlack/Discord通知などを追加可能
+    # 9. ログ保存
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: crawler-logs-${{ github.run_number }}
+        path: |
+          *.log
+          *.jsonl
+          body_map_*.json
+        retention-days: 7
+
+    # 10. 失敗時通知（任意）
+    - name: Notify on failure
+      if: failure()
+      run: echo "Crawler failed – check logs."
