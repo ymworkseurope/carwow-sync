@@ -1,129 +1,132 @@
 #!/usr/bin/env python3
 """
-auto_maker_scraper.py – 2025-09-08
-────────────────────────────────────────────────────────────
-Carwow から “全メーカー” の英語 slug を抽出し、スペース区切りで
-標準出力へ返すシンプルなツール。
-
-・Python 3.9 以降 / requests / beautifulsoup4 / lxml が必要
-・--short オプションを付けると slug 群だけを 1 行で出力
-  （GitHub Actions の環境変数用途）
+auto_maker_scraper.py – 2025-09-09 r2
+────────────────────────────────────────────────────────────────────
+Carwow から “現存する全メーカー” を抽出 → スペース区切りで返すユーティリティ
+  * /brands, トップページ, robots.txt / sitemap の３段構え
+  * 生成結果を GitHub Actions でそのまま環境変数へ流用しやすい形式で出力
+依存: requests, beautifulsoup4 (＋lxml)
 """
 
 from __future__ import annotations
-
-import argparse
-import re
-import sys
+import re, sys, time
 from typing import List, Set
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE      = "https://www.carwow.co.uk"
-HEADERS   = {"User-Agent": "Mozilla/5.0 (carwow-auto-scraper/2025)"}
-TIMEOUT   = 25
-EXCLUDE   = {
-    # 汎用ページ
-    "news","review","reviews","blog","help","about","finance","lease","used",
-    "sell","deals","search","compare","tools","electric","hybrid","suv","mpv",
-    "hatchback","saloon","coupe","estate",
-}
+BASE = "https://www.carwow.co.uk"
+HEADERS = {"User-Agent": "Mozilla/5.0 (carwow-auto-maker-scraper/2025)"}
+TIMEOUT = 20
 
+# ────────────────────────── helper
+def _extract_maker(url: str) -> str | None:
+    """URL 文字列から maker 名を推定して返す（不適切なら None）"""
+    if not url:
+        return None
+    if url.startswith("/"):
+        url = urljoin(BASE, url)
+    try:
+        path = urlparse(url).path.strip("/").lower()
+    except Exception:
+        return None
+    part = path.split("/", 1)[0]
+    if len(part) < 2 or len(part) > 20:
+        return None
+    # 除外ワード
+    if part in {
+        "news", "blog", "help", "sell", "compare", "tools", "brands",
+        "finance", "insurance", "lease", "deals", "search", "about",
+        "reviews", "electric", "hybrid", "suv", "hatchback", "saloon",
+        "estate", "coupe", "convertible", "used", "new",
+    }:
+        return None
+    if not re.fullmatch(r"[a-z\-]+", part):
+        return None
+    return part
+
+# ────────────────────────── main scraper
 class MakerScraper:
-    def __init__(self) -> None:
-        self.session          = requests.Session()
-        self.session.headers  = HEADERS.copy()
-        self.makers: Set[str] = set()
+    def __init__(self):
+        self.s = requests.Session()
+        self.s.headers.update(HEADERS)
 
-    # ────────────────────────────── public
-    def get_all(self) -> List[str]:
-        self._from_brands()
-        self._from_home()
-        self._from_sitemap()
-        return sorted(self._filter(self.makers))
-
-    # ────────────────────────────── helpers
-    def _from_brands(self) -> None:
-        print("📋  /brands ページを走査…")
+    # 1) /brands ページ
+    def from_brands(self) -> Set[str]:
+        makers: Set[str] = set()
         try:
-            soup = self._soup(f"{BASE}/brands")
+            r = self.s.get(f"{BASE}/brands", timeout=TIMEOUT)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "lxml")
             for a in soup.select('a[href*="/brands/"]'):
-                self._add(a["href"])
+                m = _extract_maker(a.get("href", ""))
+                if m:
+                    makers.add(m)
         except Exception as e:
-            print(f"  ✗ brands error: {e}")
+            print(f"[warn] /brands fetch failed: {e}", file=sys.stderr)
+        return makers
 
-    def _from_home(self) -> None:
-        print("🏠  トップページを走査…")
+    # 2) トップページ
+    def from_home(self) -> Set[str]:
+        makers: Set[str] = set()
         try:
-            soup = self._soup(BASE)
+            r = self.s.get(BASE, timeout=TIMEOUT)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "lxml")
             for a in soup.find_all("a", href=True):
-                self._add(a["href"])
+                m = _extract_maker(a["href"])
+                if m:
+                    makers.add(m)
         except Exception as e:
-            print(f"  ✗ home error: {e}")
+            print(f"[warn] / homepage fetch failed: {e}", file=sys.stderr)
+        return makers
 
-    def _from_sitemap(self) -> None:
-        print("🗺️  サイトマップを走査…")
-        for sm in ("/sitemap.xml", "/sitemap_index.xml", "/robots.txt"):
-            url = BASE + sm
+    # 3) robots.txt / sitemap
+    def from_sitemap(self) -> Set[str]:
+        makers: Set[str] = set()
+        for url in (f"{BASE}/robots.txt",
+                    f"{BASE}/sitemap.xml",
+                    f"{BASE}/sitemap_index.xml"):
             try:
-                txt = self.session.get(url, timeout=TIMEOUT).text
+                r = self.s.get(url, timeout=TIMEOUT)
+                if not r.ok:
+                    continue
+                urls = re.findall(r"https?://[^\s<>\"']+", r.text)
+                for u in urls:
+                    m = _extract_maker(u)
+                    if m:
+                        makers.add(m)
+                if makers:
+                    break
             except Exception:
                 continue
-            for u in re.findall(r"https?://[^\s\"'<>]+", txt):
-                self._add(u)
+        return makers
 
-    def _add(self, href: str) -> None:
-        slug = self._extract(href)
-        if slug:
-            self.makers.add(slug)
-
-    def _extract(self, url: str) -> str:
-        if url.startswith("/"):
-            url = urljoin(BASE, url)
-        try:
-            part = urlparse(url).path.strip("/").split("/")[0].lower()
-        except Exception:
-            return ""
-        return part if self._valid(part) else ""
-
-    # ───────── utility
-    def _soup(self, url: str) -> BeautifulSoup:
-        r = self.session.get(url, timeout=TIMEOUT)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "lxml")
-
-    def _valid(self, name: str) -> bool:
-        return (
-            1 < len(name) < 20
-            and name.isascii()
-            and re.fullmatch(r"[a-z-]+", name)
-            and name not in EXCLUDE
-        )
-
-    def _filter(self, items: Set[str]) -> List[str]:
-        print(f"✅  抽出メーカー数: {len(items)}")
-        return list(items)
+    def all_makers(self) -> List[str]:
+        makers: Set[str] = set()
+        makers.update(self.from_brands())
+        makers.update(self.from_home())
+        makers.update(self.from_sitemap())
+        # 正規化 & ソート
+        return sorted(makers)
 
 
-# ───────────────────────────────────────── CLI
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--short", action="store_true",
-                    help="スペース区切りで 1 行出力 (CI 用)")
-    args = ap.parse_args()
-
-    makers = MakerScraper().get_all()
-
-    if args.short:
-        print(" ".join(makers))
-    else:
-        print("\n📊  全メーカー一覧")
-        for i, m in enumerate(makers, 1):
-            print(f"{i:2d}. {m}")
-        print("\n🔧  環境変数用:")
-        print(f'MAKES_FOR_BODYMAP: "{" ".join(makers)}"')
+    print("🚗  Discovering all makers from carwow…", file=sys.stderr)
+    start = time.time()
+    scraper = MakerScraper()
+    makers = scraper.all_makers()
+    elapsed = time.time() - start
+    # ── human readable
+    print(f"\n✅  Found {len(makers)} makers in {elapsed:.1f}s")
+    for i, m in enumerate(makers, 1):
+        print(f"{i:>2}  {m}")
+    # ── GitHub Actions 用
+    joined = " ".join(makers)
+    print(f'\nMAKES_FOR_BODYMAP: "{joined}"')
+    # stdout へ makers だけ吐き、呼び出し側が拾う
+    print(joined)
 
 
 if __name__ == "__main__":
