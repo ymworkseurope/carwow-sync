@@ -1,89 +1,132 @@
+# .github/workflows/carwow-sync.yml
+# ──────────────────────────────────────────────────────────────────────────────
+# Daily Carwow Sync  – “all-makes” 対応版（2025-09-06）
+#
+#  ✦ 空欄なら **全メーカー** を自動取得
+#  ✦ 手動 dispatch 時に `MAKES_FOR_BODYMAP="audi bmw"` など上書きも可
+#  ✦ DEBUG_MODE はログ出力のみで動作には影響しない
+# ──────────────────────────────────────────────────────────────────────────────
 name: Daily Carwow Sync
 
 on:
+  # JST 02:00 ＝ UTC 17:00
   schedule:
-    # 日本時間 AM 2:00 = UTC 17:00 (前日)
     - cron: '0 17 * * *'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:
+    inputs:
+      MAKES_FOR_BODYMAP:
+        description: 'スペース区切りメーカー名（空 = 全部）'
+        required: false
+        default: ''
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # タイムアウト設定
-    
+    timeout-minutes: 120
+
     env:
-      SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
-      DEEPL_KEY:      ${{ secrets.DEEPL_KEY }}
-      GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
-      GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
-      # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 将来用
-      GBP_TO_JPY:     "195"
-      DEBUG_MODE:     "false"           # 本番: false, テスト: true
-      MAKES_FOR_BODYMAP: "abarth alfa-romeo audi bmw mercedes volkswagen"  # 主要メーカー
-    
+      SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
+      DEEPL_KEY:     ${{ secrets.DEEPL_KEY }}
+      GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
+      GS_SHEET_ID:   ${{ secrets.GS_SHEET_ID }}
+      GBP_TO_JPY:    '195'
+      DEBUG_MODE:    'false'
+      # workflow_dispatch で渡された値が優先。なければ空文字列。
+      MAKES_FOR_BODYMAP: ${{ github.event.inputs.MAKES_FOR_BODYMAP || '' }}
+
     steps:
-      # ① ソース取得
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      # ② Python 3.11 セットアップ
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'  # pip キャッシュを有効化
-      
-      # ③ 依存パッケージインストール
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      
-      # ④ Chrome/ChromeDriver セットアップ（Selenium用）
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@latest
-      - name: Setup ChromeDriver
-        uses: nanasess/setup-chromedriver@v2
-      
-      # ⑤ Google サービスアカウント JSON をファイル化
-      - name: Setup Google credentials
-        if: env.GS_CREDS_JSON != ''
-        run: |
-          mkdir -p secrets
-          echo "$GS_CREDS_JSON" > secrets/gs_creds.json
-      
-      # ⑥ メーカーごとに body_type マップ生成（Selenium使用）
-      - name: Build body_type maps
-        run: |
-          IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
-          for make in "${MAKES[@]}"; do
-            echo "▶ Building body map for ${make}..."
-            python body_type_mapper.py "${make}" || echo "Failed for ${make}, continuing..."
-          done
-      
-      # ⑦ メインクローラー実行
-      - name: Run main crawler
-        run: |
-          echo "Starting crawler at $(date)"
-          python scrape.py
-          echo "Crawler finished at $(date)"
-      
-      # ⑧ 実行ログを artifact に保存
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: crawler-logs-${{ github.run_number }}
-          path: |
-            *.log
-            *.jsonl
-            body_map_*.json
-          retention-days: 7
-      
-      # ⑨ エラー時の通知（オプション）
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "Crawler failed. Check the logs for details."
-          # ここにSlack/Discord通知などを追加可能
+    # 1) ソース取得
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # 2) Python 3.11
+    - name: Setup Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    # 3) 依存パッケージ
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    # 4) Chrome + ChromeDriver（Selenium）
+    - name: Setup Chrome
+      uses: browser-actions/setup-chrome@latest
+    - name: Setup ChromeDriver
+      uses: nanasess/setup-chromedriver@v2
+
+    # 5) Google SA credential
+    - name: Write Google credentials JSON
+      if: env.GS_CREDS_JSON != ''
+      run: |
+        mkdir -p secrets
+        echo "$GS_CREDS_JSON" > secrets/gs_creds.json
+
+    # 6) ────────── 取得対象メーカーを決定 ──────────
+    - name: Resolve target make list
+      id: makes
+      shell: bash
+      run: |
+        # GitHub 推奨の $GITHUB_OUTPUT を使用
+        if [[ -z "${MAKES_FOR_BODYMAP}" ]]; then
+          echo "No make list supplied – scraping ALL makes…"
+          python - <<'PY'
+import re, requests, json, os, textwrap, sys
+from bs4 import BeautifulSoup
+
+html = requests.get("https://www.carwow.co.uk", timeout=15).text
+soup = BeautifulSoup(html, "lxml")
+
+makes = sorted({ re.sub(r"^/|/$", "", a["href"].split("/")[-1])
+                 for a in soup.select("a[href^='/']") if a["href"].count('/') == 1 })
+make_str = " ".join(makes)
+print("Detected makes:", make_str)
+# 出力を GITHUB_OUTPUT に書き込む
+with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+    fh.write(f"LIST={make_str}\n")
+PY
+        else
+          echo "Using provided makes: ${MAKES_FOR_BODYMAP}"
+          echo "LIST=${MAKES_FOR_BODYMAP}" >> "$GITHUB_OUTPUT"
+        fi
+
+    # 7) body_type_mapper.py をメーカーごとに実行
+    - name: Build body-type maps (Selenium)
+      shell: bash
+      run: |
+        IFS=' ' read -ra MAKES <<< "${{ steps.makes.outputs.LIST }}"
+        for make in "${MAKES[@]}"; do
+          echo "▶ Building body map for ${make}…"
+          python body_type_mapper.py "${make}" \
+            || echo "::warning file=body_type_mapper.py::Failed for ${make}"
+        done
+
+    # 8) メインクローラー
+    - name: Run main crawler
+      run: |
+        echo "Starting crawler at $(date)"
+        python scrape.py
+        echo "Crawler finished at $(date)"
+
+    # 9) ログ & 生成物を保存
+    - name: Upload logs & JSON
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: crawler-logs-${{ github.run_number }}
+        path: |
+          *.log
+          *.jsonl
+          body_map_*.json
+        retention-days: 7
+
+    # 10) 失敗通知（オプション）
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "Crawler failed – check artifacts for details."
+        # Slack / Discord Webhook 等をここに追加可能
