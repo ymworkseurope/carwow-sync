@@ -54,6 +54,7 @@ except ImportError:
 
 # ────────────────────────── UUID helper
 UUID_NS = uuid.UUID("12345678-1234-5678-1234-123456789012")  # 固定 namespace
+
 def slug_uuid(slug: str) -> str:
     return str(uuid.uuid5(UUID_NS, slug))
 
@@ -67,6 +68,7 @@ def fetch(url: str) -> BeautifulSoup:
             raise requests.HTTPError(response=r)
         time.sleep(1 + i)
     r.raise_for_status()
+
 
 def to_int(val: str | None) -> Optional[int]:
     if not val:
@@ -359,35 +361,4 @@ def collect_all_slugs() -> List[str]:
     for bf in Path.cwd().glob("body_map_*.json"):
         make = bf.stem.replace("body_map_", "")
         for k in json.loads(bf.read_text()).keys():
-            full = k if "/" in k else f"{make}/{k}"
-            if not any(tok in SKIP_SLUG_PARTS for tok in full.split("/")):
-                slugs.append(full)
-    return sorted(set(slugs))
-
-# ────────────────────────── CLI
-def cli():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--slugs", nargs="*", help="model slugs make/slug …")
-    ap.add_argument("--make", help="target make (loads body_map_<make>.json)")
-    args = ap.parse_args()
-
-    targets: List[str] = []
-    if not args.slugs and not args.make:
-        targets = collect_all_slugs()
-    else:
-        if args.slugs:
-            for s in args.slugs:
-                if "/" in s:
-                    targets.append(s)
-                else:
-                    print(f"warn: ambiguous slug '{s}' — needs make/slug", file=sys.stderr)
-        if args.make:
-            bm = load_body_map(args.make)
-            if bm:
-                targets.extend(bm.keys())
-            else:
-                # fallback: crawl sitemap to collect paths (lightweight)
-                sm_url = f"{BASE}/sitemap/{args.make.lower()}-sitemap.xml"
-                try:
-                    txt = requests.get(sm_url, headers=HEADERS, timeout=TIMEOUT).text
-                    paths = re.findall(r"<loc>https://www.carwow.co.uk/
+            full = k if "/" in k else f"{make}/{
