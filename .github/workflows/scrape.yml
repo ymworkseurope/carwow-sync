@@ -2,14 +2,14 @@ name: Daily Carwow Sync
 
 on:
   schedule:
-    # 日本時間 AM2:00（UTC 17:00 前日）
+    # 日本時間 02:00 = UTC 17:00 (前日)
     - cron: '0 17 * * *'
-  workflow_dispatch:
+  workflow_dispatch:       # 手動実行
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180   # メーカー数が増えるので少し余裕を持たせる
+    timeout-minutes: 180   # メーカー数増加に対応
 
     env:
       SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
@@ -17,52 +17,51 @@ jobs:
       DEEPL_KEY:      ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
-      GBP_TO_JPY:     "195"
-      DEBUG_MODE:     "false"
-      MAKES_FOR_BODYMAP: ""      # ここは実行時に自動上書きされる
+      GBP_TO_JPY:     '195'
+      DEBUG_MODE:     'false'
+      MAKES_FOR_BODYMAP: ""   # Discover ステップで上書き
 
     steps:
-    # 1. リポジトリ取得
+    # ──────────────────────────────────────────────────────────────── 1. 取得
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 2. Python
+    # ──────────────────────────────────────────────────────────────── 2. Python
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
 
-    # 3. 依存インストール
+    # ──────────────────────────────────────────────────────────────── 3. 依存
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # 4. Chrome & driver
+    # ──────────────────────────────────────────────────────────────── 4. Chrome
     - name: Setup Chrome
       uses: browser-actions/setup-chrome@latest
     - name: Setup ChromeDriver
       uses: nanasess/setup-chromedriver@v2
 
-    # 5. Google SA JSON
+    # ──────────────────────────────────────────────────────────────── 5. Google SA
     - name: Setup Google credentials
       if: env.GS_CREDS_JSON != ''
       run: |
         mkdir -p secrets
         echo "$GS_CREDS_JSON" > secrets/gs_creds.json
 
-    # 6. 🔍 **全メーカーを自動取得**
+    # ──────────────────────────────────────────────────────────────── 6. 全メーカー取得
     - name: Discover all makers
       id: makers
       run: |
         echo "📡  Fetching maker list"
-        python scripts/auto_maker_scraper.py > makers.txt
-        MAKERS=$(grep '^MAKES_FOR_BODYMAP:' makers.txt | cut -d'"' -f2)
-        echo "MAKES_FOR_BODYMAP=$MAKERS" >> "$GITHUB_ENV"
-        echo "Detected makers: $MAKERS"
+        MAKERS=$(python scripts/auto_maker_scraper.py --short)
+        echo "MAKES_FOR_BODYMAP=${MAKERS}" >> "$GITHUB_ENV"
+        echo "Detected makers: ${MAKERS}"
 
-    # 7. body_type マップ生成
+    # ──────────────────────────────────────────────────────────────── 7. body_map 生成
     - name: Build body_type maps
       run: |
         IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
@@ -71,14 +70,14 @@ jobs:
           python body_type_mapper.py "${make}" || echo "Failed for ${make}, continuing..."
         done
 
-    # 8. メインクローラー
+    # ──────────────────────────────────────────────────────────────── 8. メインクローラ
     - name: Run main crawler
       run: |
         echo "Starting crawler at $(date)"
         python scrape.py
         echo "Crawler finished at $(date)"
 
-    # 9. ログ保存
+    # ──────────────────────────────────────────────────────────────── 9. ログ保存
     - name: Upload logs
       if: always()
       uses: actions/upload-artifact@v4
@@ -90,7 +89,7 @@ jobs:
           body_map_*.json
         retention-days: 7
 
-    # 10. 失敗時通知（任意）
+    # ──────────────────────────────────────────────────────────────── 10. 失敗通知
     - name: Notify on failure
       if: failure()
       run: echo "Crawler failed – check logs."
