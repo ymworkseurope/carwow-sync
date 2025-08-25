@@ -4,72 +4,89 @@ on:
   schedule:
     # 日本時間 AM 2:00 = UTC 17:00 (前日)
     - cron: '0 17 * * *'
-  workflow_dispatch:  # 手動実行も可能
+  workflow_dispatch:        # 手動実行も可能
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # タイムアウト設定
-    
+    timeout-minutes: 120
+
     env:
       SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
       DEEPL_KEY:      ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON:  ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:    ${{ secrets.GS_SHEET_ID }}
-      # GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # 将来用
       GBP_TO_JPY:     "195"
-      DEBUG_MODE:     "false"           # 本番: false, テスト: true
-      MAKES_FOR_BODYMAP: ""  # 主要メーカー
-    
+      DEBUG_MODE:     "false"
+
     steps:
       # ① ソース取得
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       # ② Python 3.11 セットアップ
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'  # pip キャッシュを有効化
-      
+          cache: 'pip'
+
       # ③ 依存パッケージインストール
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       # ④ Chrome/ChromeDriver セットアップ（Selenium用）
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@latest
       - name: Setup ChromeDriver
         uses: nanasess/setup-chromedriver@v2
-      
+
       # ⑤ Google サービスアカウント JSON をファイル化
       - name: Setup Google credentials
         if: env.GS_CREDS_JSON != ''
         run: |
           mkdir -p secrets
           echo "$GS_CREDS_JSON" > secrets/gs_creds.json
-      
-      # ⑥ メーカーごとに body_type マップ生成（Selenium使用）
+
+      # ⑥ サイトマップからメーカー一覧を取得
+      - name: Generate make list
+        id: makelist
+        run: |
+          python - <<'PY'
+          import re, requests, textwrap, os, json, sys
+          SM_URL = "https://www.carwow.co.uk/sitemap/makes-sitemap.xml"
+          xml = requests.get(SM_URL, timeout=20).text
+          makes = sorted(set(re.findall(r"https://www\.carwow\.co\.uk/([^/]+)/", xml)))
+          # 一部「colour」などノイズが入ることがあるのでフィルタ
+          skip = {"colour", "color", "lease", "news"}
+          makes = [m for m in makes if m not in skip]
+          list_str = " ".join(makes)
+          # GitHub Actions output
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"makes={list_str}\n")
+          print(f"▸ Found {len(makes)} makes")
+          PY
+
+      # ⑦ メーカーごとに body_type マップ生成
       - name: Build body_type maps
         run: |
-          IFS=' ' read -ra MAKES <<< "$MAKES_FOR_BODYMAP"
+          IFS=' ' read -ra MAKES <<< "${{ steps.makelist.outputs.makes }}"
           for make in "${MAKES[@]}"; do
             echo "▶ Building body map for ${make}..."
             python body_type_mapper.py "${make}" || echo "Failed for ${make}, continuing..."
           done
-      
-      # ⑦ メインクローラー実行
+
+      # ⑧ メインクローラー実行
       - name: Run main crawler
         run: |
           echo "Starting crawler at $(date)"
           python scrape.py
           echo "Crawler finished at $(date)"
-      
-      # ⑧ 実行ログを artifact に保存
+
+      # ⑨ 実行ログを artifact に保存
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,10 +97,10 @@ jobs:
             *.jsonl
             body_map_*.json
           retention-days: 7
-      
-      # ⑨ エラー時の通知（オプション）
+
+      # ⑩ エラー時の通知（オプション）
       - name: Notify on failure
         if: failure()
         run: |
           echo "Crawler failed. Check the logs for details."
-          # ここにSlack/Discord通知などを追加可能
+          # ここに Slack / Discord 通知などを入れる場合はこの下に追記
