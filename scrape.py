@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""carwow-sync scraper — **r10 (2025-09-06)**
+"""carwow‑sync scraper — **r11 (2025‑09‑08)**
 ────────────────────────────────────────────────────────────────────
-● **今回のパッチ内容**
-  1. **Supabase 400** ─ `id` を UUIDv5(slug) に統一（継続）。
-  2. **overview_en & media_urls 完全取得**
-     * `<script id="__NEXT_DATA__">` の JSON を解析し、
-       * `product.review.intro` → overview
-       * `product.galleryImages[*].url` → 画像
-       * これで **JS 後挿入の本文 / 高解像度画像** も取得可能。
-  3. **静的 HTML フォールバック**
-     * 従来の `<em>` や `<meta name="description">` も残し多重フォールバック。
-  4. **画像収集**
-     * `<img|source>` の `src | data-src | srcset | data-srcset` を全て走査。
-     * JSON 由来分と合わせ **重複排除して 20 枚上限**。
-  5. **スペック抽出**
-     * `__NEXT_DATA__ → product.specifications` から doors / seats / transmission 等を直接取得。
-     * HTML 上の summary-list も併用。
-  6. **skip リスト拡充** — 色 / lease / news など 43 語。
-  7. **CLI** ― `--slugs` & `--make` 両対応はそのまま。
+**今回の主な改良点**
+  1. **fuel / dimensions / grades / colours の完全取得**  
+     * `product.variants[*].fuelType`, `product.dimensions{Mm?}`、`product.trims` に対応。
+  2. **Supabase 400 再発防止** — `id` は UUIDv5(slug) で統一 (継続)。
+  3. **画像収集強化** — heroImage / mediaGallery も対象、重複排除最大 25 枚。
+  4. **スキップ語彙 50 語** — colour 系ワード追加。
+  5. CLI: `--make` はボディマップが無い場合も sitemap から補完ロード。
 
-*Python >= 3.9 / requests / beautifulsoup4 / lxml が前提*
+*Python >= 3.9 / requests / beautifulsoup4 / lxml*
 """
 from __future__ import annotations
 
@@ -38,17 +28,18 @@ from bs4 import BeautifulSoup
 
 # ────────────────────────── Global settings
 BASE = "https://www.carwow.co.uk"
-HEADERS = {"User-Agent": "Mozilla/5.0 (carwow-sync/2025-r10)"}
-TIMEOUT = 20
-MAX_IMAGES = 20
+HEADERS = {"User-Agent": "Mozilla/5.0 (carwow-sync/2025-r11)"}
+TIMEOUT = 25
+MAX_IMAGES = 25
 
-# スキップする slug トークン（43 語）
+# スキップ slug パーツ（50 語）
 SKIP_SLUG_PARTS = {
-    # サービス/雑
-    "lease", "news", "mpv",
+    # サービス/汎用
+    "lease", "news", "mpv", "van", "camper", "commercial",
     # 色
     "black", "white", "grey", "gray", "silver", "red", "blue", "green", "yellow", "orange",
-    "purple", "brown", "beige", "gold", "bronze", "pink", "multi-colour", "multi-color", "colour", "color",
+    "purple", "brown", "beige", "gold", "bronze", "pink",
+    "multi-colour", "multicolour", "multi-color", "multicolor", "colour", "color",
     # ミッション
     "automatic", "manual",
 }
@@ -63,14 +54,12 @@ except ImportError:
 
 # ────────────────────────── UUID helper
 UUID_NS = uuid.UUID("12345678-1234-5678-1234-123456789012")  # 固定 namespace
-
 def slug_uuid(slug: str) -> str:
     return str(uuid.uuid5(UUID_NS, slug))
 
 # ────────────────────────── HTTP helpers
-
 def fetch(url: str) -> BeautifulSoup:
-    for i in range(3):
+    for i in range(4):
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         if r.ok:
             return BeautifulSoup(r.text, "lxml")
@@ -78,7 +67,6 @@ def fetch(url: str) -> BeautifulSoup:
             raise requests.HTTPError(response=r)
         time.sleep(1 + i)
     r.raise_for_status()
-
 
 def to_int(val: str | None) -> Optional[int]:
     if not val:
@@ -110,23 +98,22 @@ def split_make_model(title: str) -> Tuple[str, str]:
 _body_map: Dict[str, Dict[str, List[str]]] = {}
 
 def load_body_map(make: str) -> Dict[str, List[str]]:
-    make_l = make.lower()
-    if make_l in _body_map:
-        return _body_map[make_l]
-    fp = Path(f"body_map_{make_l}.json")
+    mk = make.lower()
+    if mk in _body_map:
+        return _body_map[mk]
+    fp = Path(f"body_map_{mk}.json")
     if not fp.exists():
-        _body_map[make_l] = {}
+        _body_map[mk] = {}
         return {}
-    raw: Dict[str, List[str]] = json.loads(fp.read_text())
+    raw = json.loads(fp.read_text())
     fixed: Dict[str, List[str]] = {}
-    for k, v in raw.items():
-        slug = k if "/" in k else f"{make_l}/{k}"
-        fixed[slug] = v
-    _body_map[make_l] = fixed
+    for slug, types in raw.items():
+        fixed_slug = slug if "/" in slug else f"{mk}/{slug}"
+        fixed[fixed_slug] = types
+    _body_map[mk] = fixed
     return fixed
 
 # ────────────────────────── __NEXT_DATA__ helper
-
 def parse_next_data(soup: BeautifulSoup) -> Dict[str, Any]:
     script = soup.find("script", id="__NEXT_DATA__")
     if not script or not script.string:
@@ -145,23 +132,25 @@ def collect_images(soup: BeautifulSoup, j: Dict[str, Any]) -> List[str]:
     def add(u: str):
         if not u or not u.startswith("http"):
             return
-        u = u.split("?")[0]
-        if any(dom in u for dom in _ALLOWED_IMG_DOMS) and u not in urls:
-            urls.append(u)
+        base = u.split("?")[0]
+        if any(dom in base for dom in _ALLOWED_IMG_DOMS) and base not in urls:
+            urls.append(base)
 
-    # 1) JSON ギャラリー
-    gallery = (
-        j.get("props", {})
-        .get("pageProps", {})
-        .get("product", {})
-        .get("galleryImages", [])
-    )
-    for g in gallery:
+    prod = j.get("props", {}).get("pageProps", {}).get("product", {})
+    # 1) hero / gallery
+    add(prod.get("heroImage", ""))
+    for g in prod.get("galleryImages", []):
         add(g.get("url", ""))
         if len(urls) >= MAX_IMAGES:
             return urls[:MAX_IMAGES]
 
-    # 2) <img> & <source>
+    # 2) mediaGallery
+    for g in prod.get("mediaGallery", []):
+        add(g.get("url", ""))
+        if len(urls) >= MAX_IMAGES:
+            return urls[:MAX_IMAGES]
+
+    # 3) <img>/<source>
     for tag in soup.select("img, source"):
         for attr in ("data-srcset", "srcset", "data-src", "src"):
             src = tag.get(attr)
@@ -177,20 +166,12 @@ def collect_images(soup: BeautifulSoup, j: Dict[str, Any]) -> List[str]:
 
 
 def extract_overview(soup: BeautifulSoup, j: Dict[str, Any]) -> str:
-    # 1) NEXT_DATA JSON
-    intro = (
-        j.get("props", {})
-        .get("pageProps", {})
-        .get("product", {})
-        .get("review", {})
-        .get("intro")
-    )
+    prod = j.get("props", {}).get("pageProps", {}).get("product", {})
+    intro = prod.get("review", {}).get("intro")
     if intro and len(intro) >= 30:
         return intro.strip()
 
-    # 2) 静的 HTML
     css_try = [
-        "div.review-overview__content em",
         "div.review-overview__intro p",
         "article p",
         "div#main p",
@@ -201,32 +182,24 @@ def extract_overview(soup: BeautifulSoup, j: Dict[str, Any]) -> str:
         if tag and len(tag.get_text(strip=True)) >= 30:
             return tag.get_text(" ", strip=True)
 
-    # 3) meta description
     meta = soup.find("meta", attrs={"name": "description"})
-    if meta and meta.get("content"):
-        return meta["content"].strip()
-    return ""
+    return meta.get("content", "").strip() if meta else ""
 
 # ────────────────────────── spec helpers
-
 def scrape_specifications(path: str, j: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    # 1) JSON から
-    prod = (
-        j.get("props", {})
-        .get("pageProps", {})
-        .get("product", {})
-    )
-    spec: Dict[str, Any] = prod.get("specifications", {}) if prod else {}
-
+    prod = j.get("props", {}).get("pageProps", {}).get("product", {})
+    spec: Dict[str, Any] = prod.get("specifications", {}).copy()
     extra: Dict[str, Any] = {}
-    if prod:
-        if "dimensions" in prod:
-            d = prod["dimensions"]
-            extra["dimensions_mm"] = (
-                f"{d.get('length')} x {d.get('width')} x {d.get('height')} mm"
-                if d.get("length") else None
-            )
-    # 2) fallback HTML table
+
+    dims = prod.get("dimensions", {})
+    if dims:
+        l = dims.get("length") or dims.get("lengthMm")
+        w = dims.get("width") or dims.get("widthMm")
+        h = dims.get("height") or dims.get("heightMm")
+        if l and w and h:
+            extra["dimensions_mm"] = f"{l} x {w} x {h} mm"
+
+    # HTML fallback
     url = f"{BASE}/{path}/specifications"
     try:
         soup = fetch(url)
@@ -234,16 +207,17 @@ def scrape_specifications(path: str, j: Dict[str, Any]) -> Tuple[Dict[str, Any],
         if e.response.status_code == 404:
             return spec, extra
         raise
-
     for dt in soup.select("dt"):
         dd = dt.find_next("dd")
         if dd:
             spec[dt.get_text(strip=True)] = dd.get_text(" ", strip=True)
-
     return spec, extra
 
 
-def scrape_colours(path: str) -> List[str]:
+def scrape_colours(path: str, prod_json: Dict[str, Any]) -> List[str]:
+    colours = prod_json.get("colours") or prod_json.get("colors") or []
+    if colours:
+        return [c if isinstance(c, str) else c.get("name", "") for c in colours]
     url = f"{BASE}/{path}/colours"
     try:
         soup = fetch(url)
@@ -254,7 +228,6 @@ def scrape_colours(path: str) -> List[str]:
     return [h4.get_text(strip=True) for h4 in soup.select("h4.model-hub__colour-details-title")]
 
 # ────────────────────────── model parser
-
 def parse_model_page(path: str) -> Dict[str, Any]:
     soup = fetch(f"{BASE}/{path}")
     next_json = parse_next_data(soup)
@@ -268,16 +241,10 @@ def parse_model_page(path: str) -> Dict[str, Any]:
     body_type = load_body_map(make_en).get(path, [])
     overview_en = extract_overview(soup, next_json)
 
-    # 価格 (JSON 優先)
-    price_min_gbp = price_max_gbp = None
-    prod_json = (
-        next_json.get("props", {})
-        .get("pageProps", {})
-        .get("product", {})
-    )
-    if prod_json:
-        price_min_gbp = prod_json.get("priceMin") or prod_json.get("rrpMin")
-        price_max_gbp = prod_json.get("priceMax") or prod_json.get("rrpMax")
+    prod_json = next_json.get("props", {}).get("pageProps", {}).get("product", {})
+
+    price_min_gbp = prod_json.get("priceMin") or prod_json.get("rrpMin")
+    price_max_gbp = prod_json.get("priceMax") or prod_json.get("rrpMax")
 
     if not price_min_gbp:
         rrp = soup.select_one("span.deals-cta-list__rrp-price")
@@ -289,14 +256,24 @@ def parse_model_page(path: str) -> Dict[str, Any]:
 
     imgs = collect_images(soup, next_json)
 
-    # glance table (HTML)
+    # グランス表
     glance = {
         dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
         for dt in soup.select("div.model-hub__summary-list dt")
     }
 
     spec_tbl, extra = scrape_specifications(path, next_json)
-    colours = scrape_colours(path)
+    colours = scrape_colours(path, prod_json)
+
+    # fuelType — variants にも分布する
+    fuel_set = {prod_json.get("fuelType")} if prod_json.get("fuelType") else set()
+    for var in prod_json.get("variants", []):
+        if var.get("fuelType"):
+            fuel_set.add(var["fuelType"])
+    fuel = ", ".join(sorted(fuel_set)) if fuel_set else None
+
+    # grades / trims
+    grades = [t.get("name") for t in prod_json.get("trims", []) if t.get("name")]
 
     def pick(*keys):
         for k in keys:
@@ -304,7 +281,7 @@ def parse_model_page(path: str) -> Dict[str, Any]:
                 return glance[k]
             if k in spec_tbl and spec_tbl[k]:
                 return spec_tbl[k]
-            if prod_json and k in prod_json and prod_json[k]:
+            if k in prod_json and prod_json[k]:
                 return prod_json[k]
         return None
 
@@ -314,7 +291,7 @@ def parse_model_page(path: str) -> Dict[str, Any]:
         "make_en": make_en,
         "model_en": model_en,
         "body_type": body_type,
-        "fuel": pick("Available fuel", "Fuel type", "fuelType"),
+        "fuel": fuel or pick("Available fuel", "Fuel type"),
         "price_min_gbp": price_min_gbp,
         "price_max_gbp": price_max_gbp,
         "doors": pick("Number of doors", "doors"),
@@ -323,15 +300,14 @@ def parse_model_page(path: str) -> Dict[str, Any]:
         "drive_type": pick("Transmission", "Drive type", "transmission"),
         "overview_en": overview_en,
         "media_urls": imgs,
-        "colors": colours or prod_json.get("colours", []) if prod_json else [],
-        "grades": extra.get("grades"),
-        "engines": extra.get("engines"),
+        "colors": colours,
+        "grades": grades or None,
+        "engines": prod_json.get("engines"),
         "spec_json": json.dumps(spec_tbl, ensure_ascii=False),
         "catalog_url": f"{BASE}/{path}",
     }
 
 # ────────────────────────── Supabase & Sheets
-
 def validate(item: Dict[str, Any]) -> Tuple[bool, str]:
     miss = [k for k in ("id", "slug", "make_en", "model_en") if not item.get(k)]
     return not miss, ", ".join(miss)
@@ -353,13 +329,12 @@ def db_upsert(item: Dict[str, Any]):
             "Content-Type": "application/json",
         },
         json=item,
-        timeout=30,
+        timeout=35,
     )
     if not r.ok:
         print(f"supabase:{item['slug']}: [{r.status_code}] {r.text}", file=sys.stderr)
 
 # ────────────────────────── crawl loop
-
 def process(paths: List[str]):
     seen: set[str] = set()
     for path in paths:
@@ -379,7 +354,6 @@ def process(paths: List[str]):
             print(f"error:{path}:{e}", file=sys.stderr)
 
 # ────────────────────────── utilities
-
 def collect_all_slugs() -> List[str]:
     slugs: List[str] = []
     for bf in Path.cwd().glob("body_map_*.json"):
@@ -391,7 +365,6 @@ def collect_all_slugs() -> List[str]:
     return sorted(set(slugs))
 
 # ────────────────────────── CLI
-
 def cli():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slugs", nargs="*", help="model slugs make/slug …")
@@ -409,12 +382,12 @@ def cli():
                 else:
                     print(f"warn: ambiguous slug '{s}' — needs make/slug", file=sys.stderr)
         if args.make:
-            targets.extend(load_body_map(args.make).keys())
-
-    if not targets:
-        sys.exit("no valid targets")
-
-    process(sorted(targets))
-
-if __name__ == "__main__":
-    cli()
+            bm = load_body_map(args.make)
+            if bm:
+                targets.extend(bm.keys())
+            else:
+                # fallback: crawl sitemap to collect paths (lightweight)
+                sm_url = f"{BASE}/sitemap/{args.make.lower()}-sitemap.xml"
+                try:
+                    txt = requests.get(sm_url, headers=HEADERS, timeout=TIMEOUT).text
+                    paths = re.findall(r"<loc>https://www.carwow.co.uk/
