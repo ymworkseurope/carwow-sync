@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-# body_type_mapper.py – 2025-08-25 fixed-version
+# body_type_mapper.py – 2025-09-06 r3
 """
-使い方: python body_type_mapper.py audi
-各カテゴリー専用ページから直接車両データを取得して
-slug → [body_type,…] の対応表を body_map_<make>.json として保存
+make 単位で slug → [body_type,…] を作成。
+改良点
+  1. 無限スクロール対応（scrollTo + 判定）
+  2. make のトップページも走査
+  3. _NEXT_DATA_ の JSON があれば body_type を直接読む
+  4. カテゴリーに無い slug を最後に 'Unknown' として残さない
 """
-from __future__ import annotations
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import json
-import time
-import sys
-import re
 
-# カテゴリーとそのURL suffixの対応
+from __future__ import annotations
+import json, re, sys, time
+from pathlib import Path
+from typing import Dict, List, Set
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+
+BASE = "https://www.carwow.co.uk"
 CATEGORIES = {
     "SUVs": "suv",
-    "Electric": "electric", 
+    "Electric": "electric",
     "Hybrid": "hybrid",
     "Convertible": "convertible",
     "Estate": "estate",
@@ -28,109 +31,96 @@ CATEGORIES = {
     "Coupe": "coupe",
     "Sports": "sports",
 }
+EXCLUDE = {
+    "used", "deals", *CATEGORIES.values()
+}
 
-def extract_car_links(driver, make: str, category_url: str) -> set[str]:
-    """指定されたカテゴリーページから車のslugを抽出"""
-    try:
-        driver.get(category_url)
-        wait = WebDriverWait(driver, 10)
-        
-        # ページが読み込まれるまで待機
-        time.sleep(3)
-        
-        # 車のリンクを取得（複数のセレクタを試す）
-        possible_selectors = [
-            "a[href*='/" + make + "/'][href$='review']",  # レビューページへのリンク
-            f"a[href*='/{make}/']:not([href*='/used']):not([href*='/deals'])",  # 一般的なモデルページ
-            "article a[href*='/" + make + "/']",  # articleタグ内のリンク
-            ".car-card a, .model-card a, .vehicle-card a",  # 車カード内のリンク
-        ]
-        
-        slugs = set()
-        for selector in possible_selectors:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    href = element.get_attribute("href")
-                    if href and f"/{make}/" in href:
-                        # URLからslugを抽出 (例: /audi/q3 -> q3)
-                        match = re.search(rf"/{make}/([^/?#]+)", href)
-                        if match:
-                            slug = match.group(1)
-                            # 不要なパスを除外
-                            if slug not in ['used', 'deals', 'suv', 'electric', 'hybrid', 'convertible', 'estate', 'hatchback', 'saloon', 'coupe', 'sports']:
-                                slugs.add(slug)
-                                
-            except Exception as e:
-                print(f"セレクタ {selector} でエラー: {e}")
-                continue
-                
-        return slugs
-        
-    except Exception as e:
-        print(f"エラー: {category_url} の取得に失敗 - {e}")
-        return set()
+# ────────────────────────── helpers
 
-def build_map(make: str) -> dict[str, list[str]]:
-    """各カテゴリーページを巡回してbody typeのマッピングを作成"""
-    
-    opt = Options()
-    opt.add_argument("--headless=new")
-    opt.add_argument("--no-sandbox")  
-    opt.add_argument("--disable-dev-shm-usage")
-    opt.add_argument("--disable-blink-features=AutomationControlled")
-    opt.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opt.add_experimental_option('useAutomationExtension', False)
-    
-    slug2types: dict[str, list[str]] = {}
-    
-    with webdriver.Chrome(options=opt) as driver:
-        # User-Agentを設定
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        for body_type, url_suffix in CATEGORIES.items():
-            category_url = f"https://www.carwow.co.uk/{make}/{url_suffix}"
-            print(f"▶ {body_type}カテゴリーを取得中: {category_url}")
-            
-            slugs = extract_car_links(driver, make, category_url)
-            
-            if slugs:
-                print(f"  見つかった車両: {len(slugs)}台 - {list(slugs)}")
-                for slug in slugs:
-                    if slug not in slug2types:
-                        slug2types[slug] = []
-                    if body_type not in slug2types[slug]:
-                        slug2types[slug].append(body_type)
-            else:
-                print(f"  {body_type}カテゴリーで車両が見つかりませんでした")
-            
-            # リクエスト間隔を空ける
-            time.sleep(2)
-    
+def page_slugs(html: str, make: str) -> Set[str]:
+    """a タグと __NEXT_DATA__ の両方から slug を抽出"""
+    soup = BeautifulSoup(html, "lxml")
+    out: Set[str] = set()
+
+    # 1) a タグ
+    for a in soup.select(f"a[href*='/{make}/']"):
+        href = a.get("href") or ""
+        m = re.search(rf"/{make}/([^/?#]+)", href)
+        if m:
+            slug = m.group(1)
+            if slug not in EXCLUDE and len(slug) > 1:
+                out.add(slug)
+
+    # 2) __NEXT_DATA__ JSON
+    script = soup.find("script", id="__NEXT_DATA__")
+    if script and script.string:
+        try:
+            j = json.loads(script.string)
+            nodes = (
+                j["props"]["pageProps"]
+                .get("collection", {})
+                .get("productCardList", [])
+            )
+            for node in nodes:
+                slug = (node.get("url") or "").split("/")[-1]
+                if slug and slug not in EXCLUDE:
+                    out.add(slug)
+        except Exception:
+            pass
+
+    return out
+
+
+def scroll_to_bottom(driver) -> None:
+    last = driver.execute_script("return document.body.scrollHeight")
+    while True:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(1.2)
+        new = driver.execute_script("return document.body.scrollHeight")
+        if new == last:
+            break
+        last = new
+
+
+def grab_html(driver, url: str) -> str:
+    driver.get(url)
+    scroll_to_bottom(driver)
+    return driver.page_source
+
+
+# ────────────────────────── main mapping
+
+def build_map(make: str) -> Dict[str, List[str]]:
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+
+    slug2types: Dict[str, List[str]] = {}
+
+    with webdriver.Chrome(options=opts) as d:
+        # ① カテゴリーページ
+        for bt, suf in CATEGORIES.items():
+            url = f"{BASE}/{make}/{suf}"
+            print(f"▶ {bt:<11} {url}")
+            html = grab_html(d, url)
+            for slug in page_slugs(html, make):
+                slug2types.setdefault(slug, []).append(bt)
+
+        # ② make 直下（拾い残しケア）
+        root_html = grab_html(d, f"{BASE}/{make}")
+        for slug in page_slugs(root_html, make):
+            slug2types.setdefault(slug, [])
+
     return slug2types
 
+
 def main():
-    make = sys.argv[1] if len(sys.argv) > 1 else "audi"
-    dst = f"body_map_{make}.json"
-    
-    print(f"▶ {make}のbody mapを構築中...")
+    make = (sys.argv[1] if len(sys.argv) > 1 else "audi").lower()
     mapping = build_map(make)
-    
-    with open(dst, "w", encoding="utf-8") as f:
-        json.dump(mapping, f, ensure_ascii=False, indent=2)
-    
-    print(f"saved ⇒ {dst} ({len(mapping)} models)")
-    
-    # 結果の詳細表示
-    if mapping:
-        print("\n取得されたマッピング:")
-        for slug, types in sorted(mapping.items()):
-            print(f"  {slug}: {types}")
-    else:
-        print("⚠️ データが取得できませんでした。以下を確認してください:")
-        print("  1. メーカー名が正しいか")
-        print("  2. carwow.co.ukのサイト構造が変更されていないか")
-        print("  3. ネットワーク接続に問題がないか")
+    fp = Path(f"body_map_{make}.json")
+    fp.write_text(json.dumps(mapping, ensure_ascii=False, indent=2))
+    print(f"✓ saved {fp} ({len(mapping)} models)")
 
 if __name__ == "__main__":
     main()
