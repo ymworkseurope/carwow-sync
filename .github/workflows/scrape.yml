@@ -1,36 +1,36 @@
 name: Daily Carwow Sync
 
 on:
-  # 日本時間 AM2:00 （= UTC 17:00）に毎日実行
+  # 日本時間 AM 2:00（UTC 17:00）に毎日実行
   schedule:
     - cron: '0 17 * * *'
-  workflow_dispatch:          # 手動トリガーも可
+  workflow_dispatch:            # 手動トリガーも可
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180      # 実行上限を少し延長
+    timeout-minutes: 180        # 3 時間＝余裕多め
 
     env:
-      # ─── Secrets ───────────────────────────────────────────────
+      # ── Secrets ───────────────────────────────────────────
       SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
       DEEPL_KEY:     ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID:   ${{ secrets.GS_SHEET_ID }}
-      # ─── その他パラメータ ─────────────────────────────────────
-      GBP_TO_JPY:    "195"        # 総当り換算用
-      DEBUG_MODE:    "false"      # true にするとスクレイパが 3 車種だけ回す
-      MAKES_FOR_BODYMAP: ""       # 空なら「サイトマップ全メーカー」を自動検出
+      # ── その他パラメータ ─────────────────────────────────
+      GBP_TO_JPY:    '195'      # 固定レート換算
+      DEBUG_MODE:    'false'    # true で 3 車種テストのみ
+      MAKES_FOR_BODYMAP: ""     # 空ならサイトマップから自動抽出
 
     steps:
     # ① ソース取得
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+      name: Checkout code
 
     # ② Python 3.11
-    - name: Setup Python
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
+      name: Setup Python
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -41,11 +41,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # ④ Chrome / ChromeDriver (Selenium 用)
-    - name: Setup Chrome
-      uses: browser-actions/setup-chrome@latest
-    - name: Setup ChromeDriver
-      uses: nanasess/setup-chromedriver@v2
+    # ④ Chrome / ChromeDriver (Selenium)
+    - uses: browser-actions/setup-chrome@latest
+      name: Setup Chrome
+    - uses: nanasess/setup-chromedriver@v2
+      name: Setup ChromeDriver
 
     # ⑤ Google サービスアカウント
     - name: Setup Google credentials
@@ -54,57 +54,54 @@ jobs:
         mkdir -p secrets
         echo "$GS_CREDS_JSON" > secrets/gs_creds.json
 
-    # ⑥   ────────────────────────────────────────────────────────
-    #      “メーカー一覧” を決定
-    #      ────────────────────────────────────────────────────────
-    - name: Detect makes (from sitemap when env empty)
+    # ⑥ メーカー一覧を決定（環境変数が空なら sitemap から自動抽出）
+    - name: Detect makes
       id: makelist
+      shell: bash
       run: |
         if [[ -n "$MAKES_FOR_BODYMAP" ]]; then
-          # 1) 環境変数に手動指定があればそれを使う
           MAKES="$MAKES_FOR_BODYMAP"
         else
-          # 2) 空なら …/makes-sitemap.xml から自動抽出
+          echo "Fetching makes-sitemap.xml …"
           python - <<'PY'
-          import os, re, requests, textwrap
-          SM_URL = "https://www.carwow.co.uk/sitemap/makes-sitemap.xml"
-          xml = requests.get(SM_URL, timeout=20).text
-          makes = sorted(set(re.findall(r"https://www\.carwow\.co\.uk/([^/]+)/", xml)))
-          # colour など明らかにモデルではない slug は除外
-          skip = {
-              "colour", "color", "lease", "news", "review",
-              "used", "deals", "commercial", "van"
-          }
-          makes = [m for m in makes if m not in skip]
-          makes_str = " ".join(makes)
-          print(f"▸ Found {len(makes)} makes")
-          # GitHub Actions へ出力
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"makes={makes_str}\n")
-          PY
-          MAKES="${{ steps.makelist.outputs.makes }}"
+import os, re, requests, sys, textwrap
+SM = "https://www.carwow.co.uk/sitemap/makes-sitemap.xml"
+txt = requests.get(SM, timeout=25).text
+makes = sorted({m for m in re.findall(r"https://www\.carwow\.co\.uk/([^/]+)/", txt)})
+skip = {
+    "colour", "color", "lease", "used", "deals", "news",
+    "commercial", "van"
+}
+makes = [m for m in makes if m not in skip]
+out = " ".join(makes)
+print(f"✔︎ detected {len(makes)} makes")
+with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+    fh.write(f"makes={out}\n")
+PY
+          MAKES="$(echo "${{ steps.makelist.outputs.makes }}")"
         fi
-        echo "MAKES=${MAKES}"
-        echo "makes=${MAKES}" >> "$GITHUB_OUTPUT"
+        # 後続ステップ用にも環境変数に保持
+        echo "MAKES=$MAKES" >> "$GITHUB_ENV"
+        echo "Final make list: $MAKES"
 
-    # ⑦ body_type_mapper.py を全メーカー分まわす
+    # ⑦ body_type_mapper.py を全メーカー分実行
     - name: Build body_type maps
       run: |
-        IFS=' ' read -ra MAKES <<< "${{ steps.makelist.outputs.makes }}"
+        IFS=' ' read -ra MAKES <<< "${MAKES}"
         for make in "${MAKES[@]}"; do
-          echo "▶ Building body map for ${make}…"
+          echo "▶ Building body map for ${make} …"
           python body_type_mapper.py "${make}" \
-            || echo "⚠️  ${make}: failed (skip)"
+            || echo "⚠️  ${make}: body map 生成失敗 (skip)"
         done
 
     # ⑧ メインクローラー
     - name: Run main crawler
       run: |
         echo "Starting crawler at $(date)"
-        python scrape.py             # slug 指定無し → body_map_* を全読込
+        python scrape.py
         echo "Crawler finished at $(date)"
 
-    # ⑨ 生成物を Artifacts へ
+    # ⑨ 生成ログ／JSON を Artifacts へ
     - name: Upload logs
       if: always()
       uses: actions/upload-artifact@v4
@@ -116,9 +113,7 @@ jobs:
           body_map_*.json
         retention-days: 7
 
-    # ⑩ 失敗時通知（任意）
+    # ⑩ 失敗時の簡易通知（必要ならカスタム通知を追加）
     - name: Notify on failure
       if: failure()
-      run: |
-        echo "Crawler failed - check logs."
-        # Slack / Discord などの通知が必要ならここに書く
+      run: echo "❌ Crawler failed — 詳細はログ参照"
