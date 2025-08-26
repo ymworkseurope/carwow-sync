@@ -309,7 +309,7 @@ class VehicleScraper:
         return ""
     
     def _extract_prices(self, soup: BeautifulSoup, product: Dict) -> Dict:
-        """価格情報を取得（多様なパターンに対応）"""
+        """価格情報を取得"""
         prices = {
             'price_min_gbp': None,
             'price_max_gbp': None,
@@ -323,43 +323,27 @@ class VehicleScraper:
         # HTMLから補完
         if not prices['price_min_gbp']:
             # RRP価格
-            for selector in ['.deals-cta-list__rrp-price', '.price-tag', 'span:contains("RRP")', 'span:contains("£")']:
-                if rrp := soup.select_one(selector):
-                    if match := re.findall(r'£([\d,]+)', rrp.text):
-                        prices['price_min_gbp'] = int(match[0].replace(',', ''))
-                        if len(match) > 1:
-                            prices['price_max_gbp'] = int(match[-1].replace(',', ''))
-                        break
-        
-        # At a glanceセクションと全体から価格情報を収集
-        price_data = {}
-        
-        # dt/ddペアから
-        for dt in soup.select('dt'):
-            if dd := dt.find_next('dd'):
-                key = dt.get_text(strip=True).lower()
-                value = dd.get_text(strip=True)
-                price_data[key] = value
-        
-        # Cashプライス
-        CASH_KEYS = {'cash', 'cash price', 'price', 'rrp', 'starting price'}
-        for key in CASH_KEYS:
-            if key in price_data and not prices['price_min_gbp']:
-                if match := re.search(r'£([\d,]+)', price_data[key]):
-                    prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
-        
-        # 中古価格（多様なキーに対応）
-        USED_KEYS = {'used', 'used price', 'used from', 'used prices from', 'pre-owned'}
-        for key in USED_KEYS:
-            if key in price_data:
-                if match := re.search(r'£([\d,]+)', price_data[key]):
-                    prices['price_used_gbp'] = int(match.group(1).replace(',', ''))
-                    break
+            if rrp := soup.select_one('.deals-cta-list__rrp-price, .price-tag'):
+                if match := re.findall(r'£([\d,]+)', rrp.text):
+                    prices['price_min_gbp'] = int(match[0].replace(',', ''))
+                    if len(match) > 1:
+                        prices['price_max_gbp'] = int(match[-1].replace(',', ''))
+            
+            # At a glanceセクション
+            for dt in soup.select('dt'):
+                if 'cash' in dt.text.lower():
+                    if dd := dt.find_next('dd'):
+                        if match := re.search(r'£([\d,]+)', dd.text):
+                            prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
+                elif 'used' in dt.text.lower():
+                    if dd := dt.find_next('dd'):
+                        if match := re.search(r'£([\d,]+)', dd.text):
+                            prices['price_used_gbp'] = int(match.group(1).replace(',', ''))
         
         return prices
     
     def _extract_specs(self, soup: BeautifulSoup, product: Dict) -> Dict:
-        """基本スペックを取得（多様な見出しに対応）"""
+        """基本スペックを取得"""
         specs = {
             'fuel_type': None,
             'doors': None,
@@ -382,36 +366,17 @@ class VehicleScraper:
                 value = dd.get_text(strip=True)
                 glance_data[key] = value
         
-        # 見出しバリエーション定義
-        FUEL_KEYS = {'fuel', 'fuel type', 'fuel types', 'fuel type(s)', 'available fuel', 'engine type'}
-        DOOR_KEYS = {'doors', 'number of doors', 'no. of doors'}
-        SEAT_KEYS = {'seats', 'number of seats', 'no. of seats', 'seating capacity'}
-        TRANS_KEYS = {'transmission', 'drive type', 'drivetrain', 'gearbox', 'transmission type', 'drive'}
-        
-        # データ補完（複数の見出しパターンに対応）
+        # データ補完
         if not specs['fuel_type']:
-            for key in FUEL_KEYS:
-                if key in glance_data:
-                    specs['fuel_type'] = glance_data[key]
-                    break
-        
+            specs['fuel_type'] = glance_data.get('fuel type') or glance_data.get('available fuel')
         if not specs['doors']:
-            for key in DOOR_KEYS:
-                if key in glance_data:
-                    specs['doors'] = self._extract_number(glance_data[key])
-                    break
-        
+            if val := glance_data.get('number of doors') or glance_data.get('doors'):
+                specs['doors'] = self._extract_number(val)
         if not specs['seats']:
-            for key in SEAT_KEYS:
-                if key in glance_data:
-                    specs['seats'] = self._extract_number(glance_data[key])
-                    break
-        
+            if val := glance_data.get('number of seats') or glance_data.get('seats'):
+                specs['seats'] = self._extract_number(val)
         if not specs['transmission']:
-            for key in TRANS_KEYS:
-                if key in glance_data:
-                    specs['transmission'] = glance_data[key]
-                    break
+            specs['transmission'] = glance_data.get('transmission') or glance_data.get('drive type')
         
         return specs
     
@@ -463,89 +428,43 @@ class VehicleScraper:
         return colors
     
     def _scrape_specifications(self, slug: str) -> Dict:
-        """詳細スペックを取得（リダイレクト対応強化）"""
+        """詳細スペックを取得"""
         spec_data = {}
         
         try:
-            url = f"{BASE_URL}/{slug}/specifications"
-            response = self.client.get(url, allow_redirects=True)
-            
-            # リダイレクト先がメーカートップページの場合は無視
-            final_url = response.url
-            if f"/{slug.split('/')[0]}#" in final_url or final_url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
-                return {'specifications': {}}
-            
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = self.client.get_soup(f"{BASE_URL}/{slug}/specifications")
             
             # テーブルから取得
             for row in soup.select('table tr'):
                 cells = row.select('th, td')
                 if len(cells) >= 2:
-                    key = cells[0].get_text(strip=True).lower()
+                    key = cells[0].get_text(strip=True)
                     value = cells[1].get_text(strip=True)
                     spec_data[key] = value
             
             # dt/ddペアから取得
             for dt in soup.select('dt'):
                 if dd := dt.find_next('dd'):
-                    key = dt.get_text(strip=True).lower()
+                    key = dt.get_text(strip=True)
                     value = dd.get_text(strip=True)
                     spec_data[key] = value
             
-            # 寸法情報を構造化（多様なフォーマットに対応）
-            dimensions = self._extract_dimensions_from_spec(spec_data, soup.text)
-            if dimensions:
-                spec_data['dimensions_structured'] = dimensions
-            
-        except Exception as e:
-            print(f"  Warning: Failed to get specifications for {slug}: {e}")
+            # 寸法情報を構造化
+            if any(k in spec_data for k in ['Length', 'Width', 'Height']):
+                dimensions = []
+                for dim in ['Length', 'Width', 'Height']:
+                    if val := spec_data.get(dim):
+                        dimensions.append(val)
+                if dimensions:
+                    spec_data['dimensions_structured'] = ' x '.join(dimensions)
+        
+        except Exception:
+            pass
         
         return {'specifications': spec_data}
     
-    def _extract_dimensions_from_spec(self, spec_data: Dict, page_text: str) -> Optional[str]:
-        """寸法情報を抽出（多様なフォーマットに対応）"""
-        # キーのバリエーション
-        LENGTH_KEYS = {'length', 'overall length', 'length (mm)', 'overall length (mm)', 'total length'}
-        WIDTH_KEYS = {'width', 'overall width', 'width (mm)', 'overall width (mm)', 'width inc mirrors', 'width including mirrors'}
-        HEIGHT_KEYS = {'height', 'overall height', 'height (mm)', 'overall height (mm)', 'total height'}
-        
-        dimensions = {'length': None, 'width': None, 'height': None}
-        
-        # spec_dataから取得
-        for key, value in spec_data.items():
-            key_lower = key.lower()
-            
-            # 長さ
-            if any(lk in key_lower for lk in LENGTH_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
-                    dimensions['length'] = match.group(1)
-            
-            # 幅
-            elif any(wk in key_lower for wk in WIDTH_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
-                    dimensions['width'] = match.group(1)
-            
-            # 高さ
-            elif any(hk in key_lower for hk in HEIGHT_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
-                    dimensions['height'] = match.group(1)
-        
-        # ページテキストから補完（mm単位の数値を探す）
-        if not all(dimensions.values()):
-            mm_values = re.findall(r'(\d{3,4})\s*mm', page_text)
-            if len(mm_values) >= 3:
-                if not dimensions['length']: dimensions['length'] = mm_values[0]
-                if not dimensions['width']: dimensions['width'] = mm_values[1]
-                if not dimensions['height']: dimensions['height'] = mm_values[2]
-        
-        # 結果を構成
-        if all(dimensions.values()):
-            return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
-        
-        return None
-    
     def _determine_body_types(self, slug: str) -> List[str]:
-        """ボディタイプを推定（2段slug対応）"""
+        """ボディタイプを推定"""
         body_types = []
         maker = slug.split('/')[0]
         
@@ -565,27 +484,9 @@ class VehicleScraper:
         for body_type, category in categories.items():
             try:
                 soup = self.client.get_soup(f"{BASE_URL}/{maker}/{category}")
-                
-                # スラッグの完全一致と部分一致の両方をチェック
-                # 例: mercedes/amg-cla-45-s と amg-cla-45-s の両方でマッチ
-                model_part = slug.split('/')[-1] if '/' in slug else slug
-                
                 # このカテゴリページに該当モデルへのリンクがあるか確認
-                found = False
-                for link in soup.select('a[href]'):
-                    href = link.get('href', '')
-                    # 完全一致チェック
-                    if f"/{slug}" in href:
-                        found = True
-                        break
-                    # 部分一致チェック（AMGなど2段slugの対応）
-                    if f"/{model_part}" in href:
-                        found = True
-                        break
-                
-                if found:
+                if soup.select(f'a[href*="/{slug}"]'):
                     body_types.append(body_type)
-                    
             except Exception:
                 continue
         
