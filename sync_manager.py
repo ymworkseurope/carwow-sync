@@ -57,15 +57,6 @@ class SupabaseManager:
         if not self.enabled:
             print("Warning: Supabase credentials not configured")
     
-    def _get_column_letter(self, col_num: int) -> str:
-        """列番号を列文字に変換（AA, AB, AC...対応）"""
-        letters = ''
-        while col_num > 0:
-            col_num -= 1
-            letters = chr(65 + (col_num % 26)) + letters
-            col_num //= 26
-        return letters
-    
     def upsert(self, payload: Dict) -> bool:
         """データをUPSERT"""
         if not self.enabled:
@@ -116,6 +107,15 @@ class GoogleSheetsManager:
         self.enabled = False
         self.headers = []
         self._initialize()
+    
+    def _get_column_letter(self, col_num: int) -> str:
+        """列番号を列文字に変換（AA, AB, AC...対応）"""
+        letters = ''
+        while col_num > 0:
+            col_num -= 1
+            letters = chr(65 + (col_num % 26)) + letters
+            col_num //= 26
+        return letters
     
     def _initialize(self):
         """Google Sheets接続を初期化"""
@@ -172,6 +172,7 @@ class GoogleSheetsManager:
             
         except Exception as e:
             print(f"Google Sheets initialization error: {e}")
+            traceback.print_exc()
             self.enabled = False
     
     def _ensure_required_columns(self):
@@ -198,13 +199,14 @@ class GoogleSheetsManager:
                     self.worksheet.resize(cols=len(new_headers))
                 
                 # ヘッダーを更新
-                self.worksheet.update([new_headers], f"A1:{chr(64 + len(new_headers))}1")
+                self.worksheet.update([new_headers], f"A1:{self._get_column_letter(len(new_headers))}1")
                 self.headers = new_headers
                 
                 print(f"Added missing columns: {missing_columns}")
         
         except Exception as e:
             print(f"Column update error: {e}")
+            traceback.print_exc()
     
     def upsert(self, payload: Dict) -> bool:
         """データをUPSERT（既存列を保持）"""
@@ -227,14 +229,18 @@ class GoogleSheetsManager:
                     if slug in slug_values:
                         row_num = slug_values.index(slug) + 1
                     else:
+                        # 新規追加（最終行の次）
                         row_num = len(slug_values) + 1
                 else:
                     # slug列がない場合はエラー
+                    print(f"Error: 'slug' column not found in headers")
                     return False
                     
-            except Exception:
+            except Exception as e:
+                print(f"Error searching for existing row: {e}")
                 # エラーの場合は新規追加
-                row_num = len(self.worksheet.get_all_values()) + 1
+                all_values = self.worksheet.get_all_values()
+                row_num = len(all_values) + 1
             
             # 行データ作成（既存列の順序を保持）
             row_data = []
@@ -243,8 +249,10 @@ class GoogleSheetsManager:
                 
                 # 特殊な型の処理
                 if isinstance(value, list):
+                    # リストはJSON形式で保存
                     value = json.dumps(value, ensure_ascii=False)
                 elif isinstance(value, dict):
+                    # 辞書もJSON形式で保存
                     value = json.dumps(value, ensure_ascii=False)
                 elif value is None:
                     value = ""
@@ -256,12 +264,19 @@ class GoogleSheetsManager:
             # データ更新（列数が多い場合に対応）
             end_col = self._get_column_letter(len(self.headers))
             range_name = f"A{row_num}:{end_col}{row_num}"
-            self.worksheet.update([row_data], range_name)
+            
+            # バッチ更新を使用して効率化
+            self.worksheet.update(
+                [row_data], 
+                range_name,
+                value_input_option='RAW'
+            )
             
             return True
             
         except Exception as e:
             print(f"Sheets upsert error: {e}")
+            traceback.print_exc()
             return False
     
     def batch_upsert(self, payloads: List[Dict]) -> int:
@@ -307,6 +322,8 @@ class SyncManager:
         # メーカーリスト取得
         if makers is None:
             makers = self.scraper.get_all_makers()
+            # editorialなど無効なメーカーを除外
+            makers = [m for m in makers if m not in ['editorial', 'leasing', 'jaecoo', 'omoda']]
         
         print(f"Processing {len(makers)} makers")
         
@@ -378,9 +395,14 @@ class SyncManager:
                 self.stats['failed'] += 1
                 
         except Exception as e:
-            print(f"ERROR: {str(e)[:50]}")
+            error_msg = str(e)
+            # エラーメッセージを短縮して表示
+            if "Not a valid model page" in error_msg:
+                print("ERROR: Not a valid model page")
+            else:
+                print(f"ERROR: {error_msg[:50]}")
             self.stats['failed'] += 1
-            self.stats['errors'].append(f"{slug}: {str(e)}")
+            self.stats['errors'].append(f"{slug}: {error_msg}")
     
     def _print_statistics(self):
         """統計情報を表示"""
@@ -394,10 +416,25 @@ class SyncManager:
         
         if self.stats['errors']:
             print(f"\nErrors ({len(self.stats['errors'])} total):")
-            for error in self.stats['errors'][:10]:  # 最初の10個のみ表示
-                print(f"  - {error}")
-            if len(self.stats['errors']) > 10:
-                print(f"  ... and {len(self.stats['errors']) - 10} more")
+            # エラーを種類別に集計
+            error_types = {}
+            for error in self.stats['errors']:
+                if "Not a valid model page" in error:
+                    error_type = "Not a valid model page"
+                elif "Failed to scrape" in error:
+                    error_type = "Scraping failed"
+                else:
+                    error_type = "Other"
+                
+                if error_type not in error_types:
+                    error_types[error_type] = []
+                error_types[error_type].append(error.split(':')[0])
+            
+            for error_type, slugs in error_types.items():
+                print(f"  {error_type}: {len(slugs)} cases")
+                if len(slugs) <= 5:
+                    for slug in slugs:
+                        print(f"    - {slug}")
         
         # 成功率
         if self.stats['total'] > 0:
