@@ -293,18 +293,31 @@ class VehicleScraper:
         return ""
     
     def _extract_overview(self, soup: BeautifulSoup, product: Dict) -> str:
-        """概要文を取得"""
+        """概要文を取得（実際のページ構造に対応）"""
         # productデータから
         if review := product.get('review', {}).get('intro'):
-            return review
+            if len(review) >= 30:
+                return review.strip()
+        
+        # "What's good" / "What's not so good" の前のテキストを探す
+        for elem in soup.find_all(['p', 'div']):
+            text = elem.get_text(strip=True)
+            if len(text) >= 100 and not text.startswith('What'):
+                # 価格情報や技術仕様を含まない段落を選ぶ
+                if not any(skip in text for skip in ['£', 'mph', 'kWh', 'CO2']):
+                    return text[:500]  # 最大500文字
         
         # メタディスクリプション
         if meta := soup.find('meta', {'name': 'description'}):
-            return meta.get('content', '')
+            content = meta.get('content', '').strip()
+            if content:
+                return content
         
-        # 最初の段落
-        if p := soup.select_one('div.review-overview p, article p'):
-            return p.get_text(strip=True)
+        # フォールバック：最初の長い段落
+        for p in soup.select('article p, div.content p, p'):
+            text = p.get_text(strip=True)
+            if len(text) >= 50:
+                return text[:500]
         
         return ""
     
