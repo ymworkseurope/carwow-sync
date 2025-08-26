@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""scrape.py — **r12 (2025‑09‑08)**
+"""carwow‑sync scraper — **r13 (2025‑09‑09)**
 ────────────────────────────────────────────────────────────────────
-* r11 の末端で f‑string が閉じておらず **SyntaxError** が発生したため全面再出力。
-* 動作ロジック自体は r11 と同一で、末尾の `collect_all_slugs()` と CLI ラッパーを正しく閉じています。
-* **main の実行例**
-    ```bash
-    python scrape.py                       # body_map_* をまとめて処理
-    python scrape.py --make volvo          # volvo のみ再取得
-    python scrape.py --paths audi/q4-e-tron volkswagen/golf-r
-    ```
+* **主な変更点**
+  1. `/specifications` ページを <dt>/<dd> だけでなく **table th/td** もパース
+  2. `/colours` ページで `<li>`・汎用 colour クラスも走査
+  3. **リダイレクト検知** — 目的 URL と最終 URL が異なる場合は `RedirectError`
+  4. **中古車価格 (used) を追加**  
+     * `price_used_gbp`, `price_used_jpy` を算出（GBP→JPY は環境変数 `GBP_TO_JPY`）
+  5. 画像取得上限を 40 枚へ拡張
+
+* **CLI 例**
+  ```bash
+  python scrape.py                       # body_map_* 全モデル
+  python scrape.py --make volvo          # volvo のみ
+  python scrape.py --paths audi/q4-e-tron volkswagen/golf-r
+  ```
 """
 from __future__ import annotations
 
@@ -27,19 +33,16 @@ from bs4 import BeautifulSoup
 
 # ────────────────────────── Global settings
 BASE = "https://www.carwow.co.uk"
-HEADERS = {"User-Agent": "Mozilla/5.0 (carwow-sync/2025-r12)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (carwow-sync/2025-r13)"}
 TIMEOUT = 25
-MAX_IMAGES = 25
+MAX_IMAGES = 40
+GBP_TO_JPY = float(os.getenv("GBP_TO_JPY", "190"))  # fallback 190
 
-# スキップ slug パーツ（色・サービス語など）
 SKIP_SLUG_PARTS = {
-    "lease", "news", "mpv", "van", "camper", "commercial",  # サービス
-    # 色
+    "lease", "news", "mpv", "van", "camper", "commercial",
     "black", "white", "grey", "gray", "silver", "red", "blue", "green", "yellow", "orange",
-    "purple", "brown", "beige", "gold", "bronze", "pink",
-    "multi-colour", "multicolour", "multi-color", "multicolor", "colour", "color",
-    # ミッション
-    "automatic", "manual",
+    "purple", "brown", "beige", "gold", "bronze", "pink", "multi-colour", "multicolour",
+    "multi-color", "multicolor", "colour", "color", "automatic", "manual",
 }
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -51,25 +54,27 @@ except ImportError:
     gsheets_upsert = None
 
 # ────────────────────────── UUID helper
-UUID_NS = uuid.UUID("12345678-1234-5678-1234-123456789012")  # 固定 namespace
+UUID_NS = uuid.UUID("12345678-1234-5678-1234-123456789012")
 
 def slug_uuid(slug: str) -> str:
-    """生成済み slug 文字列→UUIDv5 (namespace 固定)
-    Supabase primary-key 用
-    """
     return str(uuid.uuid5(UUID_NS, slug))
 
 # ────────────────────────── HTTP helpers
+class RedirectError(Exception):
+    pass
 
 def fetch(url: str) -> BeautifulSoup:
     for i in range(4):
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
         if r.ok:
+            if r.url.rstrip("/") != url.rstrip("/") and len(r.history) > 0:
+                raise RedirectError(f"redirect→ {r.url}")
             return BeautifulSoup(r.text, "lxml")
         if r.status_code == 404:
             raise requests.HTTPError(response=r)
         time.sleep(1 + i)
     r.raise_for_status()
+
 
 def to_int(val: str | None) -> Optional[int]:
     if not val:
@@ -78,17 +83,14 @@ def to_int(val: str | None) -> Optional[int]:
     return int(digits) if digits.isdigit() else None
 
 # ────────────────────────── make / model split
-COMPOUND_MAKES = sorted(
-    [
-        "Rolls-Royce",
-        "Mercedes-Benz",
-        "Aston Martin",
-        "Land Rover",
-        "Alfa Romeo",
-    ],
-    key=len,
-    reverse=True,
-)
+COMPOUND_MAKES = [
+    "Rolls-Royce",
+    "Mercedes-Benz",
+    "Aston Martin",
+    "Land Rover",
+    "Alfa Romeo",
+]
+COMPOUND_MAKES.sort(key=len, reverse=True)
 
 def split_make_model(title: str) -> Tuple[str, str]:
     for mk in COMPOUND_MAKES:
@@ -109,10 +111,7 @@ def load_body_map(make: str) -> Dict[str, List[str]]:
         _body_map[mk] = {}
         return {}
     raw: Dict[str, List[str]] = json.loads(fp.read_text())
-    fixed: Dict[str, List[str]] = {}
-    for slug, types in raw.items():
-        fixed_slug = slug if "/" in slug else f"{mk}/{slug}"
-        fixed[fixed_slug] = types
+    fixed = { (slug if "/" in slug else f"{mk}/{slug}"): v for slug, v in raw.items() }
     _body_map[mk] = fixed
     return fixed
 
@@ -158,6 +157,7 @@ def collect_images(soup: BeautifulSoup, j: Dict[str, Any]) -> List[str]:
                 return urls[:MAX_IMAGES]
     return urls[:MAX_IMAGES]
 
+
 def extract_overview(soup: BeautifulSoup, j: Dict[str, Any]) -> str:
     prod = j.get("props", {}).get("pageProps", {}).get("product", {})
     intro = prod.get("review", {}).get("intro")
@@ -183,6 +183,7 @@ def scrape_specifications(path: str, j: Dict[str, Any]) -> Tuple[Dict[str, Any],
         h = dims.get("height") or dims.get("heightMm")
         if l and w and h:
             extra["dimensions_mm"] = f"{l} x {w} x {h} mm"
+
     url = f"{BASE}/{path}/specifications"
     try:
         soup = fetch(url)
@@ -190,11 +191,22 @@ def scrape_specifications(path: str, j: Dict[str, Any]) -> Tuple[Dict[str, Any],
         if e.response.status_code == 404:
             return spec, extra
         raise
+    except RedirectError:
+        return spec, extra
+
+    # dt/dd pairs
     for dt in soup.select("dt"):
         dd = dt.find_next("dd")
         if dd:
             spec[dt.get_text(strip=True)] = dd.get_text(" ", strip=True)
+    # th/td table pairs
+    for row in soup.select("table tr"):
+        th = row.find(["th", "td"])
+        td = th.find_next("td") if th else None
+        if th and td:
+            spec[th.get_text(strip=True)] = td.get_text(" ", strip=True)
     return spec, extra
+
 
 def scrape_colours(path: str, prod_json: Dict[str, Any]) -> List[str]:
     colours = prod_json.get("colours") or prod_json.get("colors") or []
@@ -203,27 +215,39 @@ def scrape_colours(path: str, prod_json: Dict[str, Any]) -> List[str]:
     url = f"{BASE}/{path}/colours"
     try:
         soup = fetch(url)
-    except requests.HTTPError as e:
-        if e.response.status_code == 404:
-            return []
-        raise
-    return [h4.get_text(strip=True) for h4 in soup.select("h4.model-hub__colour-details-title")]
+    except (requests.HTTPError, RedirectError):
+        return []
+    names: List[str] = []
+    for h4 in soup.select("h4.model-hub__colour-details-title"):
+        names.append(h4.get_text(strip=True))
+    for li in soup.select("li"):
+        if li.get("class") and any("colour" in c for c in li["class"]):
+            names.append(li.get_text(" ", strip=True))
+    return list(dict.fromkeys(names))  # uniq + preserve order
 
 # ────────────────────────── model parser
 
 def parse_model_page(path: str) -> Dict[str, Any]:
-    soup = fetch(f"{BASE}/{path}")
+    try:
+        soup = fetch(f"{BASE}/{path}")
+    except RedirectError as e:
+        raise ValueError(f"{path}: redirected ({e})")
+
     next_json = parse_next_data(soup)
     h1 = soup.find("h1")
     if not h1:
         raise ValueError(f"<h1> missing for {path}")
     title_core = re.sub(r" review.*", "", h1.get_text(strip=True), flags=re.I)
     make_en, model_en = split_make_model(title_core)
+
     body_type = load_body_map(make_en).get(path, [])
     overview_en = extract_overview(soup, next_json)
     prod_json = next_json.get("props", {}).get("pageProps", {}).get("product", {})
+
     price_min_gbp = prod_json.get("priceMin") or prod_json.get("rrpMin")
     price_max_gbp = prod_json.get("priceMax") or prod_json.get("rrpMax")
+    price_used_gbp = None
+
     if not price_min_gbp:
         rrp = soup.select_one("span.deals-cta-list__rrp-price")
         if rrp and "£" in rrp.text:
@@ -231,19 +255,31 @@ def parse_model_page(path: str) -> Dict[str, Any]:
             if pounds:
                 price_min_gbp = to_int(pounds[0])
                 price_max_gbp = to_int(pounds[-1])
+
     imgs = collect_images(soup, next_json)
+
     glance = {
         dt.get_text(strip=True): dt.find_next("dd").get_text(strip=True)
         for dt in soup.select("div.model-hub__summary-list dt")
     }
+
     spec_tbl, extra = scrape_specifications(path, next_json)
+
+    # 中古車価格 (Used)
+    for key in ("Used", "Used price", "Used Price"):
+        if key in spec_tbl and spec_tbl[key]:
+            price_used_gbp = to_int(spec_tbl[key])
+            break
+
     colours = scrape_colours(path, prod_json)
+
     fuel_set = {prod_json.get("fuelType")}
     for var in prod_json.get("variants", []):
         if var.get("fuelType"):
             fuel_set.add(var["fuelType"])
     fuel_set.discard(None)
     fuel = ", ".join(sorted(fuel_set)) if fuel_set else None
+
     grades = [t.get("name") for t in prod_json.get("trims", []) if t.get("name")]
 
     def pick(*keys):
@@ -256,6 +292,8 @@ def parse_model_page(path: str) -> Dict[str, Any]:
                 return prod_json[k]
         return None
 
+    price_used_jpy = int(price_used_gbp * GBP_TO_JPY) if price_used_gbp else None
+
     return {
         "id": slug_uuid(path),
         "slug": path,
@@ -265,6 +303,10 @@ def parse_model_page(path: str) -> Dict[str, Any]:
         "fuel": fuel or pick("Available fuel", "Fuel type"),
         "price_min_gbp": price_min_gbp,
         "price_max_gbp": price_max_gbp,
+        "price_used_gbp": price_used_gbp,
+        "price_min_jpy": int(price_min_gbp * GBP_TO_JPY) if price_min_gbp else None,
+        "price_max_jpy": int(price_max_gbp * GBP_TO_JPY) if price_max_gbp else None,
+        "price_used_jpy": price_used_jpy,
         "doors": pick("Number of doors", "doors"),
         "seats": pick("Number of seats", "seats"),
         "dimensions_mm": extra.get("dimensions_mm"),
@@ -355,7 +397,6 @@ def cli():
             return
         process(sorted(bm.keys()))
         return
-    # デフォルト: body_map_* をすべて連結
     process(collect_all_slugs())
 
 
