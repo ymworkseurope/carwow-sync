@@ -388,7 +388,7 @@ class VehicleScraper:
         return prices
     
     def _extract_specs(self, soup: BeautifulSoup, product: Dict) -> Dict:
-        """基本スペックを取得（多様な見出しに対応）"""
+        """基本スペックを取得（At a glanceセクション対応）"""
         specs = {
             'fuel_type': None,
             'doors': None,
@@ -403,43 +403,76 @@ class VehicleScraper:
         specs['seats'] = product.get('numberOfSeats')
         specs['transmission'] = product.get('transmission')
         
-        # At a glanceセクション
-        glance_data = {}
-        for dt in soup.select('div.review-overview__at-a-glance dt, dt'):
-            if dd := dt.find_next('dd'):
-                key = dt.get_text(strip=True).lower()
-                value = dd.get_text(strip=True)
-                glance_data[key] = value
+        # すべてのkey-valueペアを収集
+        all_data = {}
         
-        # 見出しバリエーション定義
-        FUEL_KEYS = {'fuel', 'fuel type', 'fuel types', 'fuel type(s)', 'available fuel', 'engine type'}
-        DOOR_KEYS = {'doors', 'number of doors', 'no. of doors'}
-        SEAT_KEYS = {'seats', 'number of seats', 'no. of seats', 'seating capacity'}
-        TRANS_KEYS = {'transmission', 'drive type', 'drivetrain', 'gearbox', 'transmission type', 'drive'}
+        # At a glanceセクション（新レイアウト）
+        for section in soup.select('div.review-overview__at-a-glance, div.at-a-glance, section.specs'):
+            for dt in section.select('dt'):
+                if dd := dt.find_next('dd'):
+                    key = dt.get_text(strip=True).lower()
+                    value = dd.get_text(strip=True)
+                    all_data[key] = value
         
-        # データ補完（複数の見出しパターンに対応）
+        # 汎用的なdt/ddペア（At a glanceがない場合）
+        if not all_data:
+            for dt in soup.select('dt'):
+                if dd := dt.find_next_sibling('dd'):
+                    key = dt.get_text(strip=True).lower()
+                    value = dd.get_text(strip=True)
+                    all_data[key] = value
+        
+        # テーブルからも取得
+        for row in soup.select('table tr'):
+            cells = row.select('th, td')
+            if len(cells) >= 2:
+                key = cells[0].get_text(strip=True).lower()
+                value = cells[1].get_text(strip=True)
+                all_data[key] = value
+        
+        # 見出しバリエーション定義（より広範囲）
+        FUEL_KEYS = {
+            'fuel', 'fuel type', 'fuel types', 'fuel type(s)', 
+            'available fuel', 'available fuel types', 'engine type',
+            'engine', 'power source', 'energy'
+        }
+        DOOR_KEYS = {
+            'doors', 'number of doors', 'no. of doors', 'no of doors',
+            'door count', 'door configuration'
+        }
+        SEAT_KEYS = {
+            'seats', 'number of seats', 'no. of seats', 'no of seats',
+            'seating capacity', 'seating', 'passenger capacity'
+        }
+        TRANS_KEYS = {
+            'transmission', 'drive type', 'drivetrain', 'gearbox', 
+            'transmission type', 'drive', 'gear type', 'drive system',
+            'transmission and drive'
+        }
+        
+        # データ補完
         if not specs['fuel_type']:
             for key in FUEL_KEYS:
-                if key in glance_data:
-                    specs['fuel_type'] = glance_data[key]
+                if key in all_data:
+                    specs['fuel_type'] = all_data[key]
                     break
         
         if not specs['doors']:
             for key in DOOR_KEYS:
-                if key in glance_data:
-                    specs['doors'] = self._extract_number(glance_data[key])
+                if key in all_data:
+                    specs['doors'] = self._extract_number(all_data[key])
                     break
         
         if not specs['seats']:
             for key in SEAT_KEYS:
-                if key in glance_data:
-                    specs['seats'] = self._extract_number(glance_data[key])
+                if key in all_data:
+                    specs['seats'] = self._extract_number(all_data[key])
                     break
         
         if not specs['transmission']:
             for key in TRANS_KEYS:
-                if key in glance_data:
-                    specs['transmission'] = glance_data[key]
+                if key in all_data:
+                    specs['transmission'] = all_data[key]
                     break
         
         return specs
