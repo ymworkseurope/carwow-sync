@@ -309,7 +309,7 @@ class VehicleScraper:
         return ""
     
     def _extract_prices(self, soup: BeautifulSoup, product: Dict) -> Dict:
-        """価格情報を取得（多様なパターンに対応）"""
+        """価格情報を取得（実際のCarwowページ構造に対応）"""
         prices = {
             'price_min_gbp': None,
             'price_max_gbp': None,
@@ -320,41 +320,57 @@ class VehicleScraper:
         prices['price_min_gbp'] = product.get('priceMin') or product.get('rrpMin')
         prices['price_max_gbp'] = product.get('priceMax') or product.get('rrpMax')
         
-        # HTMLから補完
+        # RRP範囲を探す（例: "RRP £29,985 - £34,485"）
         if not prices['price_min_gbp']:
-            # RRP価格
-            for selector in ['.deals-cta-list__rrp-price', '.price-tag', 'span:contains("RRP")', 'span:contains("£")']:
-                if rrp := soup.select_one(selector):
-                    if match := re.findall(r'£([\d,]+)', rrp.text):
-                        prices['price_min_gbp'] = int(match[0].replace(',', ''))
-                        if len(match) > 1:
-                            prices['price_max_gbp'] = int(match[-1].replace(',', ''))
+            # 複数のパターンを試す
+            patterns = [
+                r'RRP\s*£([\d,]+)\s*-\s*£([\d,]+)',  # RRP範囲
+                r'£([\d,]+)\s*-\s*£([\d,]+)',         # 単純な価格範囲
+                r'From\s*£([\d,]+)',                   # From価格
+                r'Cash\s*£([\d,]+)',                   # Cash価格
+            ]
+            
+            page_text = soup.get_text()
+            for pattern in patterns:
+                if match := re.search(pattern, page_text):
+                    if '-' in pattern:  # 範囲の場合
+                        prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
+                        prices['price_max_gbp'] = int(match.group(2).replace(',', ''))
+                    else:  # 単一価格の場合
+                        prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
+                    if prices['price_min_gbp']:
                         break
         
-        # At a glanceセクションと全体から価格情報を収集
-        price_data = {}
-        
-        # dt/ddペアから
-        for dt in soup.select('dt'):
-            if dd := dt.find_next('dd'):
-                key = dt.get_text(strip=True).lower()
-                value = dd.get_text(strip=True)
-                price_data[key] = value
-        
-        # Cashプライス
-        CASH_KEYS = {'cash', 'cash price', 'price', 'rrp', 'starting price'}
-        for key in CASH_KEYS:
-            if key in price_data and not prices['price_min_gbp']:
-                if match := re.search(r'£([\d,]+)', price_data[key]):
-                    prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
-        
-        # 中古価格（多様なキーに対応）
-        USED_KEYS = {'used', 'used price', 'used from', 'used prices from', 'pre-owned'}
-        for key in USED_KEYS:
-            if key in price_data:
-                if match := re.search(r'£([\d,]+)', price_data[key]):
+        # 中古価格を探す（例: "Used £20,720"）
+        if not prices['price_used_gbp']:
+            used_patterns = [
+                r'Used\s*£([\d,]+)',
+                r'Used\s*from\s*£([\d,]+)',
+                r'Pre-owned\s*£([\d,]+)',
+            ]
+            
+            for pattern in used_patterns:
+                if match := re.search(pattern, page_text):
                     prices['price_used_gbp'] = int(match.group(1).replace(',', ''))
                     break
+        
+        # 価格セクションを特定して解析
+        for element in soup.select('div, span, p'):
+            text = element.get_text(strip=True)
+            
+            # Cash価格
+            if 'Cash' in text and not prices['price_min_gbp']:
+                if match := re.search(r'£([\d,]+)', text):
+                    prices['price_min_gbp'] = int(match.group(1).replace(',', ''))
+            
+            # Monthly価格（参考）
+            elif 'Monthly' in text:
+                continue  # 月額は今回は取得しない
+            
+            # Used価格
+            elif 'Used' in text and not prices['price_used_gbp']:
+                if match := re.search(r'£([\d,]+)', text):
+                    prices['price_used_gbp'] = int(match.group(1).replace(',', ''))
         
         return prices
     
