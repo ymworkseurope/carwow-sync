@@ -105,6 +105,7 @@ class GoogleSheetsManager:
     def __init__(self):
         self.worksheet = None
         self.enabled = False
+        self.headers = []
         self._initialize()
     
     def _initialize(self):
@@ -138,6 +139,12 @@ class GoogleSheetsManager:
             # ワークシート取得または作成
             try:
                 self.worksheet = spreadsheet.worksheet(SHEET_NAME)
+                # 既存のヘッダーを取得
+                self.headers = self.worksheet.row_values(1)
+                if not self.headers:
+                    # ヘッダーがない場合は初期設定
+                    self.headers = SHEET_HEADERS
+                    self.worksheet.update([self.headers], "A1")
             except gspread.WorksheetNotFound:
                 self.worksheet = spreadsheet.add_worksheet(
                     title=SHEET_NAME,
@@ -145,7 +152,11 @@ class GoogleSheetsManager:
                     cols=len(SHEET_HEADERS)
                 )
                 # ヘッダー設定
-                self.worksheet.update([SHEET_HEADERS], "A1")
+                self.headers = SHEET_HEADERS
+                self.worksheet.update([self.headers], "A1")
+            
+            # 必要な列を追加（既存列は保持）
+            self._ensure_required_columns()
             
             self.enabled = True
             print(f"Connected to Google Sheets: {SHEET_NAME}")
@@ -154,20 +165,40 @@ class GoogleSheetsManager:
             print(f"Google Sheets initialization error: {e}")
             self.enabled = False
     
-    def _ensure_headers(self):
-        """ヘッダー行を確認・設定"""
+    def _ensure_required_columns(self):
+        """必要な列を追加（既存列は保持）"""
         if not self.enabled:
             return
         
         try:
+            # 既存のヘッダーを取得
             current_headers = self.worksheet.row_values(1)
-            if current_headers != SHEET_HEADERS:
-                self.worksheet.update([SHEET_HEADERS], "A1")
+            
+            # 必要な列で不足しているものを特定
+            missing_columns = []
+            for required_col in SHEET_HEADERS:
+                if required_col not in current_headers:
+                    missing_columns.append(required_col)
+            
+            if missing_columns:
+                # 新しいヘッダー（既存 + 不足分）
+                new_headers = current_headers + missing_columns
+                
+                # ワークシートのサイズを拡張
+                if len(new_headers) > self.worksheet.col_count:
+                    self.worksheet.resize(cols=len(new_headers))
+                
+                # ヘッダーを更新
+                self.worksheet.update([new_headers], f"A1:{chr(64 + len(new_headers))}1")
+                self.headers = new_headers
+                
+                print(f"Added missing columns: {missing_columns}")
+        
         except Exception as e:
-            print(f"Header update error: {e}")
+            print(f"Column update error: {e}")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT"""
+        """データをUPSERT（既存列を保持）"""
         if not self.enabled:
             return False
         
@@ -179,15 +210,26 @@ class GoogleSheetsManager:
             
             # 既存データ検索
             try:
-                cell = self.worksheet.find(slug)
-                row_num = cell.row
-            except gspread.CellNotFound:
-                # 新規追加
+                # slug列を特定
+                if 'slug' in self.headers:
+                    slug_col = self.headers.index('slug') + 1
+                    slug_values = self.worksheet.col_values(slug_col)
+                    
+                    if slug in slug_values:
+                        row_num = slug_values.index(slug) + 1
+                    else:
+                        row_num = len(slug_values) + 1
+                else:
+                    # slug列がない場合はエラー
+                    return False
+                    
+            except Exception:
+                # エラーの場合は新規追加
                 row_num = len(self.worksheet.get_all_values()) + 1
             
-            # 行データ作成
+            # 行データ作成（既存列の順序を保持）
             row_data = []
-            for header in SHEET_HEADERS:
+            for header in self.headers:
                 value = payload.get(header)
                 
                 # 特殊な型の処理
@@ -203,7 +245,7 @@ class GoogleSheetsManager:
                 row_data.append(value)
             
             # データ更新
-            range_name = f"A{row_num}:{chr(64 + len(SHEET_HEADERS))}{row_num}"
+            range_name = f"A{row_num}:{chr(64 + len(self.headers))}{row_num}"
             self.worksheet.update([row_data], range_name)
             
             return True
