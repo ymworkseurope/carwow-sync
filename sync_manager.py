@@ -57,6 +57,15 @@ class SupabaseManager:
         if not self.enabled:
             print("Warning: Supabase credentials not configured")
     
+    def _get_column_letter(self, col_num: int) -> str:
+        """列番号を列文字に変換（AA, AB, AC...対応）"""
+        letters = ''
+        while col_num > 0:
+            col_num -= 1
+            letters = chr(65 + (col_num % 26)) + letters
+            col_num //= 26
+        return letters
+    
     def upsert(self, payload: Dict) -> bool:
         """データをUPSERT"""
         if not self.enabled:
@@ -244,8 +253,9 @@ class GoogleSheetsManager:
                 
                 row_data.append(value)
             
-            # データ更新
-            range_name = f"A{row_num}:{chr(64 + len(self.headers))}{row_num}"
+            # データ更新（列数が多い場合に対応）
+            end_col = self._get_column_letter(len(self.headers))
+            range_name = f"A{row_num}:{end_col}{row_num}"
             self.worksheet.update([row_data], range_name)
             
             return True
