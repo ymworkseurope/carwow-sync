@@ -18,9 +18,9 @@ UUID_NAMESPACE = uuid.UUID("12345678-1234-5678-1234-123456789012")
 # 日本語翻訳マッピング
 MAKE_JA = {
     "abarth": "アバルト",
-    "alfa-romeo": "アルファロメオ",
+    "alfa romeo": "アルファロメオ",
     "alpine": "アルピーヌ",
-    "aston-martin": "アストンマーチン",
+    "aston martin": "アストンマーチン",
     "audi": "アウディ",
     "bentley": "ベントレー",
     "bmw": "BMW",
@@ -41,7 +41,7 @@ MAKE_JA = {
     "jeep": "ジープ",
     "kia": "キア",
     "lamborghini": "ランボルギーニ",
-    "land-rover": "ランドローバー",
+    "land rover": "ランドローバー",
     "lexus": "レクサス",
     "lotus": "ロータス",
     "maserati": "マセラティ",
@@ -56,7 +56,7 @@ MAKE_JA = {
     "polestar": "ポールスター",
     "porsche": "ポルシェ",
     "renault": "ルノー",
-    "rolls-royce": "ロールスロイス",
+    "rolls royce": "ロールスロイス",
     "seat": "セアト",
     "skoda": "シュコダ",
     "smart": "スマート",
@@ -72,7 +72,6 @@ MAKE_JA = {
 
 BODY_TYPE_JA = {
     "SUV": "SUV",
-    "SUVs": "SUV",
     "Electric": "電気自動車",
     "Hybrid": "ハイブリッド",
     "Convertible": "カブリオレ",
@@ -80,12 +79,7 @@ BODY_TYPE_JA = {
     "Hatchback": "ハッチバック",
     "Saloon": "セダン",
     "Coupe": "クーペ",
-    "Sports": "スポーツカー",
-    "Small cars": "小型車",
-    "Hot hatches": "ホットハッチ",
-    "People carriers": "ミニバン",
-    "Camper vans": "キャンピングカー",
-    "Electric vans": "電気バン"
+    "Sports": "スポーツカー"
 }
 
 TRANSMISSION_JA = {
@@ -94,7 +88,6 @@ TRANSMISSION_JA = {
     "CVT": "CVT",
     "Electric": "EV",
     "Semi-automatic": "セミAT",
-    "Tiptronic": "ティプトロニック",
     "DSG": "DSG",
     "DCT": "DCT"
 }
@@ -105,7 +98,7 @@ class TranslationService:
     
     @staticmethod
     def translate_with_deepl(text: str, target_lang: str = "JA") -> str:
-        """DeepL APIで翻訳（エラー時は原文を返す）"""
+        """DeepL APIで翻訳"""
         if not text or not DEEPL_API_KEY:
             return text
         
@@ -148,7 +141,6 @@ class TranslationService:
         if not trans_en:
             return ""
         
-        # 単語単位でチェック
         for eng, jpn in TRANSMISSION_JA.items():
             if eng.lower() in trans_en.lower():
                 return jpn
@@ -211,19 +203,10 @@ class DataProcessor:
     def process_vehicle_data(self, raw_data: Dict) -> List[Dict]:
         """
         生データをデータベース形式に変換（トリムごとに複数行生成）
-        
-        Args:
-            raw_data: スクレイパーから取得した生データ
-        
-        Returns:
-            データベース用に整形されたデータのリスト（トリムごと）
         """
-        # UUID生成
-        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, raw_data['slug']))
-        
-        # メーカー・モデル名の処理
+        # 基本情報の処理
         make_en = self._clean_make_name(raw_data.get('make', ''))
-        model_en = raw_data.get('model', '')  # タイトルから取得済み
+        model_en = raw_data.get('model', '')
         
         # 日本語翻訳
         make_ja = self.translator.translate_make(make_en)
@@ -243,22 +226,9 @@ class DataProcessor:
         price_max_jpy = self._convert_to_jpy(price_max_gbp)
         price_used_jpy = self._convert_to_jpy(price_used_gbp)
         
-        # doors/seatsを正しく取得
+        # doors/seatsを取得
         doors = self._safe_int(raw_data.get('doors'))
         seats = self._safe_int(raw_data.get('seats'))
-        
-        # spec_jsonから補完
-        if spec_json := raw_data.get('specifications', {}):
-            if not doors:
-                for key in ['doors', 'number of doors', 'Doors']:
-                    if key in spec_json:
-                        doors = self._safe_int(spec_json[key])
-                        break
-            if not seats:
-                for key in ['seats', 'number of seats', 'Seats']:
-                    if key in spec_json:
-                        seats = self._safe_int(spec_json[key])
-                        break
         
         # カラー処理
         colors = raw_data.get('colors', [])
@@ -266,14 +236,22 @@ class DataProcessor:
         # メディアURL処理
         media_urls = self._process_media_urls(raw_data.get('images', []))
         
-        # トリム情報を取得（なければデフォルト）
+        # トリム情報を取得
         trims = raw_data.get('trims', [])
         if not trims:
             trims = [{'trim_name': 'Standard'}]
         
         # 各トリムごとにペイロードを作成
         payloads = []
-        for trim in trims:
+        for trim_index, trim in enumerate(trims):
+            # UUID生成（トリムごとにユニーク）
+            trim_id = f"{raw_data['slug']}_{trim.get('trim_name', 'Standard')}_{trim_index}"
+            vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, trim_id))
+            
+            # トリム固有情報
+            trim_name = trim.get('trim_name', 'Standard')
+            engine = trim.get('engine', '')
+            
             # トランスミッション処理
             transmission_en = trim.get('transmission') or raw_data.get('transmission', '')
             transmission_ja = self.translator.translate_transmission(transmission_en)
@@ -283,15 +261,24 @@ class DataProcessor:
             fuel_ja = self.translator.translate_fuel(fuel_en)
             
             # ドライブタイプ処理
-            drive_en = trim.get('drive_type') or raw_data.get('drive_type', '')
+            drive_en = trim.get('drive_type', '')
             drive_ja = self.translator.translate_drive_type(drive_en)
             
-            # スペック情報の整理（トリム固有情報を含む）
+            # full_model_jaの生成（余計な文字を除去）
+            trim_name_clean = self._clean_trim_name(trim_name)
+            full_model_parts = [make_ja, model_en]
+            if trim_name_clean and trim_name_clean != 'Standard':
+                full_model_parts.append(trim_name_clean)
+            full_model_ja = ' '.join(full_model_parts)
+            
+            # スペック情報の整理
             spec_json = self._compile_specifications(raw_data)
             spec_json.update({
                 'trim_info': trim,
                 'doors': doors,
-                'seats': seats
+                'seats': seats,
+                'grade': trim_name,  # gradeとして追加
+                'engine': engine      # engineとして追加
             })
             
             payload = {
@@ -301,7 +288,9 @@ class DataProcessor:
                 'model_en': model_en,
                 'make_ja': make_ja,
                 'model_ja': model_ja,
-                'trim_name': trim.get('trim_name', 'Standard'),
+                'trim_name': trim_name,
+                'grade': trim_name,  # grade列として追加
+                'engine': engine,    # engine列として追加
                 'body_type': body_types_en,
                 'body_type_ja': body_types_ja,
                 'fuel': fuel_en,
@@ -325,7 +314,7 @@ class DataProcessor:
                 'colors': colors,
                 'media_urls': media_urls,
                 'catalog_url': raw_data.get('url'),
-                'full_model_ja': f"{make_ja} {model_en} {trim.get('trim_name', '')}".strip(),
+                'full_model_ja': full_model_ja,
                 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
                 'spec_json': json.dumps(spec_json, ensure_ascii=False)
             }
@@ -336,10 +325,8 @@ class DataProcessor:
     
     def _clean_make_name(self, make: str) -> str:
         """メーカー名のクリーニング"""
-        # ハイフンをスペースに変換して正規化
         make = make.replace('-', ' ')
         
-        # 特殊ケースの処理
         special_cases = {
             'alfa romeo': 'Alfa Romeo',
             'aston martin': 'Aston Martin',
@@ -352,19 +339,18 @@ class DataProcessor:
         if make_lower in special_cases:
             return special_cases[make_lower]
         
-        # 通常は各単語の頭文字を大文字化
         return make.title()
     
-    def _clean_model_name(self, model: str) -> str:
-        """モデル名のクリーニング"""
-        # 基本的に大文字化
-        model = model.upper()
+    def _clean_trim_name(self, trim_name: str) -> str:
+        """トリム名のクリーニング（余計な文字を除去）"""
+        if not trim_name:
+            return ""
         
-        # 特殊ケース（例：e-tron → e-tron）
-        if 'E-TRON' in model:
-            model = model.replace('E-TRON', 'e-tron')
+        # "0 s", "2 s"などの不要な文字列を除去
+        cleaned = re.sub(r'\b\d+\s*s\b', '', trim_name)
+        cleaned = cleaned.strip()
         
-        return model
+        return cleaned
     
     def _safe_int(self, value: Any) -> Optional[int]:
         """安全な整数変換"""
@@ -375,7 +361,6 @@ class DataProcessor:
             return int(value)
         
         if isinstance(value, str):
-            # カンマや通貨記号を除去
             cleaned = value.replace(',', '').replace('£', '').replace('¥', '')
             try:
                 return int(float(cleaned))
@@ -392,7 +377,7 @@ class DataProcessor:
     
     def _compile_specifications(self, raw_data: Dict) -> Dict:
         """スペック情報をまとめる"""
-        specs = raw_data.get('specifications', {})
+        specs = raw_data.get('specifications', {}).copy()
         
         # 基本スペックを追加
         specs.update({
@@ -422,7 +407,7 @@ class DataProcessor:
                 processed.append(url)
                 seen.add(url)
         
-        return processed[:40]  # 最大40枚
+        return processed[:40]
 
 # ======================== Validation ========================
 class DataValidator:
@@ -430,12 +415,7 @@ class DataValidator:
     
     @staticmethod
     def validate_payload(payload: Dict) -> tuple[bool, List[str]]:
-        """
-        データの妥当性を検証
-        
-        Returns:
-            (is_valid, error_messages)
-        """
+        """データの妥当性を検証"""
         errors = []
         
         # 必須フィールドのチェック
@@ -457,69 +437,4 @@ class DataValidator:
             if price_min > price_max:
                 errors.append(f"Price min ({price_min}) > Price max ({price_max})")
         
-        # 画像URLの検証
-        media_urls = payload.get('media_urls', [])
-        if not isinstance(media_urls, list):
-            errors.append("media_urls must be a list")
-        
         return len(errors) == 0, errors
-
-# ======================== Test Function ========================
-def test_processor():
-    """データプロセッサーのテスト"""
-    
-    # テストデータ
-    raw_data = {
-        'slug': 'audi/a4',
-        'make': 'audi',
-        'model': 'a4',
-        'title': 'Audi A4 Review',
-        'overview': 'The Audi A4 is a premium compact executive car.',
-        'price_min_gbp': 35000,
-        'price_max_gbp': 55000,
-        'price_used_gbp': 28000,
-        'fuel_type': 'Petrol',
-        'doors': 4,
-        'seats': 5,
-        'transmission': 'Automatic',
-        'body_types': ['Saloon', 'Estate'],
-        'colors': ['Glacier White', 'Mythos Black'],
-        'images': [
-            'https://example.com/image1.jpg',
-            'https://example.com/image2.jpg'
-        ],
-        'url': 'https://www.carwow.co.uk/audi/a4',
-        'specifications': {
-            'Engine': '2.0 TFSI',
-            'Power': '190 hp'
-        }
-    }
-    
-    # 処理実行
-    processor = DataProcessor()
-    payloads = processor.process_vehicle_data(raw_data)
-    
-    # 結果表示
-    print(f"Generated {len(payloads)} payload(s):")
-    for i, payload in enumerate(payloads):
-        print(f"\nPayload {i+1}:")
-        for key, value in payload.items():
-            if isinstance(value, list):
-                print(f"  {key}: {value[:2]}... ({len(value)} items)")
-            elif isinstance(value, str) and len(value) > 50:
-                print(f"  {key}: {value[:50]}...")
-            else:
-                print(f"  {key}: {value}")
-    
-    # 検証
-    validator = DataValidator()
-    for i, payload in enumerate(payloads):
-        is_valid, errors = validator.validate_payload(payload)
-        print(f"\nValidation for payload {i+1}: {'PASS' if is_valid else 'FAIL'}")
-        if errors:
-            for error in errors:
-                print(f"  - {error}")
-
-
-if __name__ == "__main__":
-    test_processor()
