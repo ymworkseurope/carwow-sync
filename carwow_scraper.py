@@ -341,44 +341,38 @@ class VehicleScraper:
         return model or title
     
     def _extract_overview(self, soup: BeautifulSoup, product: Dict) -> str:
-        """概要文を取得（ナビゲーション要素を除外）"""
+        """概要文を取得"""
         # productデータから
         if review := product.get('review', {}).get('intro'):
             if len(review) >= 30:
                 return review.strip()
         
-        # メインコンテンツエリアのみから取得
-        overview_texts = []
-        
-        # articleやmain要素内のテキストのみ
-        for selector in ['article', 'main', 'div.review-content', 'div.model-overview']:
-            content_area = soup.select_one(selector)
-            if content_area:
-                # ナビゲーション要素を除外
-                for nav in content_area.select('nav, header, footer, aside, .navigation, .menu, .breadcrumb'):
-                    nav.decompose()
-                
-                # パラグラフを取得
-                for p in content_area.select('p'):
-                    text = p.get_text(strip=True)
-                    # 条件を満たすテキストのみ
-                    if (len(text) >= 100 and 
-                        not any(skip in text.lower() for skip in 
-                               ['cookie', 'privacy', 'log out', 'settings', 'browse', 'your account', 
-                                'part exchange', 'archived', 'report', 'communication']) and
-                        not re.search(r'£[\d,]+', text)):
-                        overview_texts.append(text)
-                        if len(overview_texts) >= 2:
-                            break
-            if overview_texts:
-                break
-        
-        if overview_texts:
-            return ' '.join(overview_texts[:2])[:800]
-        
-        # メタディスクリプションをフォールバック
+        # メタディスクリプションから（最も確実）
         if meta := soup.find('meta', {'name': 'description'}):
-            return meta.get('content', '').strip()
+            content = meta.get('content', '').strip()
+            # ナビゲーションメニューでないことを確認
+            if content and not content.startswith('Your account') and len(content) >= 50:
+                return content
+        
+        # og:descriptionから
+        if og_meta := soup.find('meta', {'property': 'og:description'}):
+            content = og_meta.get('content', '').strip()
+            if content and not content.startswith('Your account') and len(content) >= 50:
+                return content
+        
+        # Specificationsページから取得を試みる
+        try:
+            spec_soup = self.client.get_soup(f"{BASE_URL}/{soup.get('slug', '')}/specifications")
+            for elem in spec_soup.select('.trim-description, .model-description, p'):
+                text = elem.get_text(strip=True)
+                # 有効な説明文の条件
+                if (len(text) >= 100 and 
+                    not text.startswith('Your account') and
+                    not text.startswith('Browse') and
+                    not text.startswith('Cash')):
+                    return text[:800]
+        except:
+            pass
         
         return ""
     
@@ -422,6 +416,7 @@ class VehicleScraper:
                 r'Pre-owned\s*£([\d,]+)',
             ]
             
+            page_text = soup.get_text()
             for pattern in used_patterns:
                 if match := re.search(pattern, page_text):
                     prices['price_used_gbp'] = int(match.group(1).replace(',', ''))
@@ -625,7 +620,7 @@ class VehicleScraper:
         return {'specifications': spec_data}
     
     def _scrape_trims_and_engines(self, slug: str) -> List[Dict]:
-        """トリムとエンジン情報を取得（改善版）"""
+        """トリムとエンジン情報を取得"""
         trims = []
         
         try:
@@ -639,100 +634,116 @@ class VehicleScraper:
             
             soup = BeautifulSoup(response.text, 'lxml')
             
-            # Trims and engines セクションを探す
-            for section in soup.select('div.specification-breakdown__item'):
-                trim_data = {
-                    'trim_name': '',  # grade
-                    'engine': '',     # エンジン情報全体
-                    'fuel_type': '',
-                    'power_bhp': None,
-                    'transmission': '',
-                    'drive_type': ''
-                }
-                
-                # トリム名とエンジン情報を取得
-                title_elem = section.select_one('.specification-breakdown__title')
-                if title_elem:
-                    full_title = title_elem.get_text(strip=True)
-                    # タイトルの解析（例："114kW 42.2kWh Auto"）
-                    trim_data['engine'] = full_title
-                
-                # プライマリカテゴリから基本情報を取得
-                for item in section.select('li.specification-breakdown__category-list-item'):
-                    text = item.get_text(strip=True)
-                    text_lower = text.lower()
+            # "Trims and engines" セクションを探す
+            trims_section = None
+            for heading in soup.find_all(['h2', 'h3']):
+                if 'Trims and engines' in heading.get_text():
+                    # 次の兄弟要素がトリムのコンテナ
+                    trims_section = heading.find_parent().find_next_sibling()
+                    if not trims_section:
+                        trims_section = heading.find_parent()
+                    break
+            
+            # トリムカードを探す
+            trim_cards = []
+            if trims_section:
+                trim_cards = trims_section.find_all('div', recursive=True)
+            else:
+                # フォールバック：ページ全体から探す
+                trim_cards = soup.find_all('div')
+            
+            # 各トリムを処理
+            for card in trim_cards:
+                # RRPが含まれているカードを探す
+                card_text = card.get_text()
+                if 'RRP' in card_text and '£' in card_text:
+                    trim_data = {
+                        'trim_name': '',
+                        'engine': '',
+                        'fuel_type': '',
+                        'power_bhp': None,
+                        'transmission': '',
+                        'drive_type': ''
+                    }
                     
-                    # 燃料タイプ
-                    if any(fuel in text_lower for fuel in ['petrol', 'diesel', 'electric', 'hybrid', 'phev']):
-                        trim_data['fuel_type'] = text
+                    # トリム名を探す（例: "500e Convertible Standard", "500e Convertible Turismo"）
+                    # h3, h4, または強調されたテキストから
+                    for elem in card.find_all(['h3', 'h4', 'strong', 'b']):
+                        elem_text = elem.get_text(strip=True)
+                        # モデル名を含み、RRPを含まないテキスト
+                        if '500e' in elem_text and 'RRP' not in elem_text:
+                            # モデル名部分を除去してトリム名を取得
+                            if 'Convertible' in elem_text:
+                                trim_name = elem_text.split('Convertible')[-1].strip()
+                            else:
+                                trim_name = elem_text.split('500e')[-1].strip()
+                            
+                            if trim_name:
+                                trim_data['trim_name'] = trim_name
+                                break
                     
-                    # 馬力
-                    elif 'bhp' in text_lower or 'hp' in text_lower:
-                        if match := re.search(r'(\d+)\s*(?:bhp|hp)', text_lower):
-                            trim_data['power_bhp'] = int(match.group(1))
+                    # トリム名が見つからない場合、"Standard"か"Turismo"を探す
+                    if not trim_data['trim_name']:
+                        if 'Standard' in card_text:
+                            trim_data['trim_name'] = 'Standard'
+                        elif 'Turismo' in card_text:
+                            trim_data['trim_name'] = 'Turismo'
+                    
+                    # エンジン情報を抽出（電気自動車の場合）
+                    if match := re.search(r'(\d+)\s*(?:hp|bhp)', card_text):
+                        power = int(match.group(1))
+                        trim_data['power_bhp'] = power
+                        trim_data['engine'] = f"{power}hp Electric Motor"
+                        trim_data['fuel_type'] = 'Electric'
+                    
+                    # バッテリー容量
+                    if match := re.search(r'(\d+(?:\.\d+)?)\s*kWh', card_text):
+                        battery = match.group(1)
+                        if not trim_data['engine']:
+                            trim_data['engine'] = f"{battery}kWh Battery"
                     
                     # トランスミッション
-                    elif any(trans in text_lower for trans in ['automatic', 'manual', 'cvt', 'dsg']):
-                        trim_data['transmission'] = text
+                    if 'automatic' in card_text.lower():
+                        trim_data['transmission'] = 'Automatic'
+                    elif 'manual' in card_text.lower():
+                        trim_data['transmission'] = 'Manual'
                     
                     # ドライブタイプ
-                    elif any(drive in text_lower for drive in ['front wheel', 'rear wheel', 'all wheel', '4wd', 'awd', 'fwd', 'rwd']):
-                        trim_data['drive_type'] = text
-                
-                # トリム名の抽出（親要素から）
-                parent_section = section.find_parent('div', class_='specification-breakdown')
-                if parent_section:
-                    header = parent_section.find_previous_sibling(['h2', 'h3'])
-                    if header:
-                        trim_data['trim_name'] = header.get_text(strip=True)
-                
-                # トリム名がまだない場合は"Standard"
-                if not trim_data['trim_name']:
-                    trim_data['trim_name'] = 'Standard'
-                
-                trims.append(trim_data)
-            
-            # 代替: specification-breakdownクラスの構造を解析
-            if not trims:
-                for breakdown in soup.select('div.specification-breakdown'):
-                    # トリム名を取得
-                    trim_name = 'Standard'
-                    header = breakdown.find_previous_sibling(['h2', 'h3'])
-                    if header:
-                        trim_name = header.get_text(strip=True)
+                    if 'front wheel drive' in card_text.lower():
+                        trim_data['drive_type'] = 'Front wheel drive'
+                    elif 'rear wheel drive' in card_text.lower():
+                        trim_data['drive_type'] = 'Rear wheel drive'
+                    elif 'all wheel drive' in card_text.lower() or 'awd' in card_text.lower():
+                        trim_data['drive_type'] = 'All wheel drive'
                     
-                    # 各エンジンバリエーションを取得
-                    for item in breakdown.select('div.specification-breakdown__item'):
-                        trim_data = {
-                            'trim_name': trim_name,
-                            'engine': '',
-                            'fuel_type': '',
-                            'power_bhp': None,
-                            'transmission': '',
-                            'drive_type': ''
-                        }
+                    # トリム名が取得できた場合のみ追加
+                    if trim_data['trim_name']:
+                        trims.append(trim_data)
+            
+            # トリムが見つからない場合、__NEXT_DATA__から取得を試みる
+            if not trims:
+                script = soup.find('script', id='__NEXT_DATA__')
+                if script and script.string:
+                    try:
+                        data = json.loads(script.string)
+                        page_props = data.get('props', {}).get('pageProps', {})
                         
-                        # エンジンタイトルを取得
-                        if title := item.select_one('.specification-breakdown__title'):
-                            trim_data['engine'] = title.get_text(strip=True)
-                        
-                        # 詳細情報を取得
-                        for li in item.select('li'):
-                            text = li.get_text(strip=True)
-                            text_lower = text.lower()
-                            
-                            if any(f in text_lower for f in ['petrol', 'diesel', 'electric', 'hybrid']):
-                                trim_data['fuel_type'] = text
-                            elif 'bhp' in text_lower:
-                                if match := re.search(r'(\d+)', text):
-                                    trim_data['power_bhp'] = int(match.group(1))
-                            elif any(t in text_lower for t in ['automatic', 'manual', 'cvt']):
-                                trim_data['transmission'] = text
-                            elif any(d in text_lower for d in ['front wheel', 'rear wheel', 'all wheel']):
-                                trim_data['drive_type'] = text
-                        
-                        if trim_data['engine'] or trim_data['fuel_type']:
-                            trims.append(trim_data)
+                        # specificationsオブジェクトを探す
+                        if 'specifications' in page_props:
+                            specs = page_props['specifications']
+                            if 'trims' in specs:
+                                for trim in specs['trims']:
+                                    trim_data = {
+                                        'trim_name': trim.get('name', 'Standard'),
+                                        'engine': trim.get('engine', ''),
+                                        'fuel_type': trim.get('fuelType', ''),
+                                        'power_bhp': trim.get('powerBhp'),
+                                        'transmission': trim.get('transmission', ''),
+                                        'drive_type': trim.get('driveType', '')
+                                    }
+                                    trims.append(trim_data)
+                    except (json.JSONDecodeError, KeyError):
+                        pass
         
         except Exception as e:
             print(f"  Warning: Failed to get trims for {slug}: {e}")
