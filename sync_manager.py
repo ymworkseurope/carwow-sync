@@ -60,45 +60,82 @@ class SupabaseManager:
             print("Warning: Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT"""
-        if not self.enabled:
+    """データをUPSERT（media_urls修正版）"""
+    if not self.enabled:
+        return False
+    
+    try:
+        slug = payload.get('slug')
+        if not slug:
             return False
         
+        # 既存データ検索
         try:
-            response = requests.post(
-                f"{self.url}/rest/v1/cars",
-                headers={
-                    "apikey": self.key,
-                    "Authorization": f"Bearer {self.key}",
-                    "Content-Type": "application/json",
-                    "Prefer": "resolution=merge-duplicates"
-                },
-                json=payload,
-                timeout=30
-            )
-            
-            if response.status_code in [200, 201]:
-                return True
+            if 'slug' in self.headers:
+                slug_col = self.headers.index('slug') + 1
+                slug_values = self.worksheet.col_values(slug_col)
+                
+                if slug in slug_values:
+                    row_num = slug_values.index(slug) + 1
+                else:
+                    row_num = len(slug_values) + 1
             else:
-                print(f"Supabase error: {response.status_code} - {response.text}")
+                print(f"Error: 'slug' column not found")
                 return False
                 
         except Exception as e:
-            print(f"Supabase exception: {e}")
-            return False
-    
-    def batch_upsert(self, payloads: List[Dict]) -> int:
-        """複数データを一括UPSERT"""
-        if not self.enabled:
-            return 0
+            print(f"Error searching: {e}")
+            all_values = self.worksheet.get_all_values()
+            row_num = len(all_values) + 1
         
-        success_count = 0
-        for payload in payloads:
-            if self.upsert(payload):
-                success_count += 1
-            time.sleep(0.1)  # レート制限対策
+        # 行データ作成
+        row_data = []
+        for header in self.headers:
+            value = payload.get(header)
+            
+            # media_urlsの特別処理（修正版）
+            if header == 'media_urls' and isinstance(value, list) and value:
+                # 最大5個の画像URLをハイパーリンクにする
+                hyperlinks = []
+                for i, url in enumerate(value[:5], 1):
+                    # HYPERLINK関数を使用
+                    hyperlinks.append(f'=HYPERLINK("{url}","画像{i}")')
+                # セル内改行で結合
+                value = '\n'.join(hyperlinks)
+            elif isinstance(value, list):
+                if header == 'colors' and value:
+                    value = ', '.join(value)
+                elif header == 'body_type' and value:
+                    value = ', '.join(value)
+                elif header == 'body_type_ja' and value:
+                    value = ', '.join(value)
+                else:
+                    value = json.dumps(value, ensure_ascii=False)
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)
+            elif value is None:
+                value = ""
+            else:
+                value = str(value)
+            
+            row_data.append(value)
         
-        return success_count
+        # データ更新
+        end_col = self._get_column_letter(len(self.headers))
+        range_name = f"A{row_num}:{end_col}{row_num}"
+        
+        self.worksheet.update(
+            [row_data], 
+            range_name,
+            value_input_option='USER_ENTERED'  # HYPERLINK関数を解釈
+        )
+        
+        return True
+        
+    except Exception as e:
+        print(f"Sheets upsert error: {e}")
+        traceback.print_exc()
+        return False
 
 # ======================== Sheets Manager ========================
 class GoogleSheetsManager:
