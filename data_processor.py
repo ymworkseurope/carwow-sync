@@ -1,4 +1,48 @@
-#!/usr/bin/env python3
+@staticmethod
+    def translate_fuel(fuel_en: str) -> str:
+        """燃料タイプを日本語に変換"""
+        if not fuel_en:
+            return ""
+        
+        fuel_map = {
+            'petrol': 'ガソリン',
+            'diesel': 'ディーゼル',
+            'electric': '電気',
+            'hybrid': 'ハイブリッド',
+            'phev': 'プラグインハイブリッド',
+            'mild hybrid': 'マイルドハイブリッド'
+        }
+        
+        fuel_lower = fuel_en.lower()
+        for eng, jpn in fuel_map.items():
+            if eng in fuel_lower:
+                return jpn
+        
+        return fuel_en
+    
+    @staticmethod
+    def translate_drive_type(drive_en: str) -> str:
+        """ドライブタイプを日本語に変換"""
+        if not drive_en:
+            return ""
+        
+        drive_map = {
+            'front wheel drive': 'FF（前輪駆動）',
+            'rear wheel drive': 'FR（後輪駆動）',
+            'all wheel drive': 'AWD（全輪駆動）',
+            'four wheel drive': '4WD（四輪駆動）',
+            'fwd': 'FF',
+            'rwd': 'FR',
+            'awd': 'AWD',
+            '4wd': '4WD'
+        }
+        
+        drive_lower = drive_en.lower()
+        for eng, jpn in drive_map.items():
+            if eng in drive_lower:
+                return jpn
+        
+        return drive_en#!/usr/bin/env python3
 """
 data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
@@ -162,7 +206,131 @@ class DataProcessor:
     def __init__(self):
         self.translator = TranslationService()
     
-    def process_vehicle_data(self, raw_data: Dict) -> Dict:
+    def process_vehicle_data(self, raw_data: Dict) -> List[Dict]:
+        """
+        生データをデータベース形式に変換（トリムごとに複数行生成）
+        
+        Args:
+            raw_data: スクレイパーから取得した生データ
+        
+        Returns:
+            データベース用に整形されたデータのリスト（トリムごと）
+        """
+        # UUID生成
+        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, raw_data['slug']))
+        
+        # メーカー・モデル名の処理
+        make_en = self._clean_make_name(raw_data.get('make', ''))
+        model_en = raw_data.get('model', '')  # タイトルから取得済み
+        
+        # 日本語翻訳
+        make_ja = self.translator.translate_make(make_en)
+        model_ja = model_en  # モデル名は通常そのまま
+        overview_ja = self.translator.translate_with_deepl(raw_data.get('overview', ''))
+        
+        # ボディタイプ処理
+        body_types_en = raw_data.get('body_types', [])
+        body_types_ja = [self.translator.translate_body_type(bt) for bt in body_types_en]
+        
+        # 基本価格処理
+        price_min_gbp = self._safe_int(raw_data.get('price_min_gbp'))
+        price_max_gbp = self._safe_int(raw_data.get('price_max_gbp'))
+        price_used_gbp = self._safe_int(raw_data.get('price_used_gbp'))
+        
+        price_min_jpy = self._convert_to_jpy(price_min_gbp)
+        price_max_jpy = self._convert_to_jpy(price_max_gbp)
+        price_used_jpy = self._convert_to_jpy(price_used_gbp)
+        
+        # doors/seatsを正しく取得
+        doors = self._safe_int(raw_data.get('doors'))
+        seats = self._safe_int(raw_data.get('seats'))
+        
+        # spec_jsonから補完
+        if spec_json := raw_data.get('specifications', {}):
+            if not doors:
+                for key in ['doors', 'number of doors', 'Doors']:
+                    if key in spec_json:
+                        doors = self._safe_int(spec_json[key])
+                        break
+            if not seats:
+                for key in ['seats', 'number of seats', 'Seats']:
+                    if key in spec_json:
+                        seats = self._safe_int(spec_json[key])
+                        break
+        
+        # カラー処理
+        colors = raw_data.get('colors', [])
+        
+        # メディアURL処理
+        media_urls = self._process_media_urls(raw_data.get('images', []))
+        
+        # トリム情報を取得（なければデフォルト）
+        trims = raw_data.get('trims', [])
+        if not trims:
+            trims = [{'trim_name': 'Standard'}]
+        
+        # 各トリムごとにペイロードを作成
+        payloads = []
+        for trim in trims:
+            # トランスミッション処理
+            transmission_en = trim.get('transmission') or raw_data.get('transmission', '')
+            transmission_ja = self.translator.translate_transmission(transmission_en)
+            
+            # 燃料タイプ処理
+            fuel_en = trim.get('fuel_type') or raw_data.get('fuel_type', '')
+            fuel_ja = self.translator.translate_fuel(fuel_en)
+            
+            # ドライブタイプ処理
+            drive_en = trim.get('drive_type') or raw_data.get('drive_type', '')
+            drive_ja = self.translator.translate_drive_type(drive_en)
+            
+            # スペック情報の整理（トリム固有情報を含む）
+            spec_json = self._compile_specifications(raw_data)
+            spec_json.update({
+                'trim_info': trim,
+                'doors': doors,
+                'seats': seats
+            })
+            
+            payload = {
+                'id': vehicle_id,
+                'slug': raw_data['slug'],
+                'make_en': make_en,
+                'model_en': model_en,
+                'make_ja': make_ja,
+                'model_ja': model_ja,
+                'trim_name': trim.get('trim_name', 'Standard'),
+                'body_type': body_types_en,
+                'body_type_ja': body_types_ja,
+                'fuel': fuel_en,
+                'fuel_ja': fuel_ja,
+                'transmission': transmission_en,
+                'transmission_ja': transmission_ja,
+                'price_min_gbp': price_min_gbp,
+                'price_max_gbp': price_max_gbp,
+                'price_used_gbp': price_used_gbp,
+                'price_min_jpy': price_min_jpy,
+                'price_max_jpy': price_max_jpy,
+                'price_used_jpy': price_used_jpy,
+                'overview_en': raw_data.get('overview', ''),
+                'overview_ja': overview_ja,
+                'doors': doors,
+                'seats': seats,
+                'power_bhp': trim.get('power_bhp'),
+                'drive_type': drive_en,
+                'drive_type_ja': drive_ja,
+                'dimensions_mm': raw_data.get('dimensions') or spec_json.get('dimensions_structured'),
+                'colors': colors,
+                'media_urls': media_urls,
+                'catalog_url': raw_data.get('url'),
+                'full_model_ja': f"{make_ja} {model_en} {trim.get('trim_name', '')}".strip(),
+                'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                'spec_json': json.dumps(spec_json, ensure_ascii=False)
+            }
+            
+            payloads.append(payload)
+        
+        return payloads
         """
         生データをデータベース形式に変換
         
