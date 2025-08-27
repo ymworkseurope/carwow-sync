@@ -1,48 +1,4 @@
-@staticmethod
-def translate_fuel(fuel_en: str) -> str:
-        """燃料タイプを日本語に変換"""
-        if not fuel_en:
-            return ""
-        
-        fuel_map = {
-            'petrol': 'ガソリン',
-            'diesel': 'ディーゼル',
-            'electric': '電気',
-            'hybrid': 'ハイブリッド',
-            'phev': 'プラグインハイブリッド',
-            'mild hybrid': 'マイルドハイブリッド'
-        }
-        
-        fuel_lower = fuel_en.lower()
-        for eng, jpn in fuel_map.items():
-            if eng in fuel_lower:
-                return jpn
-        
-        return fuel_en
-    
-    @staticmethod
-    def translate_drive_type(drive_en: str) -> str:
-        """ドライブタイプを日本語に変換"""
-        if not drive_en:
-            return ""
-        
-        drive_map = {
-            'front wheel drive': 'FF（前輪駆動）',
-            'rear wheel drive': 'FR（後輪駆動）',
-            'all wheel drive': 'AWD（全輪駆動）',
-            'four wheel drive': '4WD（四輪駆動）',
-            'fwd': 'FF',
-            'rwd': 'FR',
-            'awd': 'AWD',
-            '4wd': '4WD'
-        }
-        
-        drive_lower = drive_en.lower()
-        for eng, jpn in drive_map.items():
-            if eng in drive_lower:
-                return jpn
-        
-        return drive_en#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
@@ -198,6 +154,52 @@ class TranslationService:
                 return jpn
         
         return trans_en
+    
+    @staticmethod
+    def translate_fuel(fuel_en: str) -> str:
+        """燃料タイプを日本語に変換"""
+        if not fuel_en:
+            return ""
+        
+        fuel_map = {
+            'petrol': 'ガソリン',
+            'diesel': 'ディーゼル',
+            'electric': '電気',
+            'hybrid': 'ハイブリッド',
+            'phev': 'プラグインハイブリッド',
+            'mild hybrid': 'マイルドハイブリッド'
+        }
+        
+        fuel_lower = fuel_en.lower()
+        for eng, jpn in fuel_map.items():
+            if eng in fuel_lower:
+                return jpn
+        
+        return fuel_en
+    
+    @staticmethod
+    def translate_drive_type(drive_en: str) -> str:
+        """ドライブタイプを日本語に変換"""
+        if not drive_en:
+            return ""
+        
+        drive_map = {
+            'front wheel drive': 'FF（前輪駆動）',
+            'rear wheel drive': 'FR（後輪駆動）',
+            'all wheel drive': 'AWD（全輪駆動）',
+            'four wheel drive': '4WD（四輪駆動）',
+            'fwd': 'FF',
+            'rwd': 'FR',
+            'awd': 'AWD',
+            '4wd': '4WD'
+        }
+        
+        drive_lower = drive_en.lower()
+        for eng, jpn in drive_map.items():
+            if eng in drive_lower:
+                return jpn
+        
+        return drive_en
 
 # ======================== Data Processor ========================
 class DataProcessor:
@@ -331,85 +333,6 @@ class DataProcessor:
             payloads.append(payload)
         
         return payloads
-        """
-        生データをデータベース形式に変換
-        
-        Args:
-            raw_data: スクレイパーから取得した生データ
-        
-        Returns:
-            データベース用に整形されたデータ
-        """
-        # UUID生成
-        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, raw_data['slug']))
-        
-        # メーカー・モデル名の処理
-        make_en = self._clean_make_name(raw_data.get('make', ''))
-        model_en = self._clean_model_name(raw_data.get('model', ''))
-        
-        # 日本語翻訳
-        make_ja = self.translator.translate_make(make_en)
-        model_ja = model_en  # モデル名は通常そのまま
-        overview_ja = self.translator.translate_with_deepl(raw_data.get('overview', ''))
-        
-        # ボディタイプ処理
-        body_types_en = raw_data.get('body_types', [])
-        body_types_ja = [self.translator.translate_body_type(bt) for bt in body_types_en]
-        
-        # 価格処理
-        price_min_gbp = self._safe_int(raw_data.get('price_min_gbp'))
-        price_max_gbp = self._safe_int(raw_data.get('price_max_gbp'))
-        price_used_gbp = self._safe_int(raw_data.get('price_used_gbp'))
-        
-        price_min_jpy = self._convert_to_jpy(price_min_gbp)
-        price_max_jpy = self._convert_to_jpy(price_max_gbp)
-        price_used_jpy = self._convert_to_jpy(price_used_gbp)
-        
-        # トランスミッション処理
-        transmission_en = raw_data.get('transmission', '')
-        transmission_ja = self.translator.translate_transmission(transmission_en)
-        
-        # スペック情報の整理
-        spec_json = self._compile_specifications(raw_data)
-        
-        # 画像URLの処理
-        media_urls = self._process_media_urls(raw_data.get('images', []))
-        
-        # 最終的なペイロード構築
-        payload = {
-            'id': vehicle_id,
-            'slug': raw_data['slug'],
-            'make_en': make_en,
-            'model_en': model_en,
-            'make_ja': make_ja,
-            'model_ja': model_ja,
-            'body_type': body_types_en,
-            'body_type_ja': body_types_ja,
-            'fuel': raw_data.get('fuel_type'),
-            'price_min_gbp': price_min_gbp,
-            'price_max_gbp': price_max_gbp,
-            'price_used_gbp': price_used_gbp,
-            'price_min_jpy': price_min_jpy,
-            'price_max_jpy': price_max_jpy,
-            'price_used_jpy': price_used_jpy,
-            'overview_en': raw_data.get('overview', ''),
-            'overview_ja': overview_ja,
-            'spec_json': json.dumps(spec_json, ensure_ascii=False),
-            'media_urls': media_urls,
-            'catalog_url': raw_data.get('url'),
-            'doors': self._safe_int(raw_data.get('doors')),
-            'seats': self._safe_int(raw_data.get('seats')),
-            'dimensions_mm': raw_data.get('dimensions') or spec_json.get('dimensions_structured'),
-            'drive_type': transmission_en,
-            'drive_type_ja': transmission_ja,
-            'grades': raw_data.get('grades'),
-            'engines': raw_data.get('engines'),
-            'colors': raw_data.get('colors'),
-            'full_model_ja': f"{make_ja} {model_en}",
-            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'
-        }
-        
-        return payload
     
     def _clean_make_name(self, make: str) -> str:
         """メーカー名のクリーニング"""
@@ -574,26 +497,28 @@ def test_processor():
     
     # 処理実行
     processor = DataProcessor()
-    payload = processor.process_vehicle_data(raw_data)
+    payloads = processor.process_vehicle_data(raw_data)
     
     # 結果表示
-    print("Processed payload:")
-    for key, value in payload.items():
-        if isinstance(value, list):
-            print(f"  {key}: {value[:2]}... ({len(value)} items)")
-        elif isinstance(value, str) and len(value) > 50:
-            print(f"  {key}: {value[:50]}...")
-        else:
-            print(f"  {key}: {value}")
+    print(f"Generated {len(payloads)} payload(s):")
+    for i, payload in enumerate(payloads):
+        print(f"\nPayload {i+1}:")
+        for key, value in payload.items():
+            if isinstance(value, list):
+                print(f"  {key}: {value[:2]}... ({len(value)} items)")
+            elif isinstance(value, str) and len(value) > 50:
+                print(f"  {key}: {value[:50]}...")
+            else:
+                print(f"  {key}: {value}")
     
     # 検証
     validator = DataValidator()
-    is_valid, errors = validator.validate_payload(payload)
-    
-    print(f"\nValidation: {'PASS' if is_valid else 'FAIL'}")
-    if errors:
-        for error in errors:
-            print(f"  - {error}")
+    for i, payload in enumerate(payloads):
+        is_valid, errors = validator.validate_payload(payload)
+        print(f"\nValidation for payload {i+1}: {'PASS' if is_valid else 'FAIL'}")
+        if errors:
+            for error in errors:
+                print(f"  - {error}")
 
 
 if __name__ == "__main__":
