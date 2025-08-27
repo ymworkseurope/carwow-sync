@@ -36,13 +36,15 @@ GS_SHEET_ID = os.getenv("GS_SHEET_ID")
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
-    "body_type", "body_type_ja", "fuel", 
+    "trim_name", "body_type", "body_type_ja", "fuel", "fuel_ja",
+    "transmission", "transmission_ja",
     "price_min_gbp", "price_max_gbp", "price_used_gbp",
     "price_min_jpy", "price_max_jpy", "price_used_jpy",
-    "overview_en", "overview_ja", "spec_json", "media_urls",
-    "catalog_url", "doors", "seats", "dimensions_mm",
-    "drive_type", "drive_type_ja", "grades", "engines", 
-    "colors", "full_model_ja", "updated_at"
+    "overview_en", "overview_ja",
+    "doors", "seats", "power_bhp",
+    "drive_type", "drive_type_ja", "dimensions_mm",
+    "colors", "media_urls", "catalog_url",
+    "full_model_ja", "updated_at", "spec_json"
 ]
 
 # ======================== Database Manager ========================
@@ -248,9 +250,20 @@ class GoogleSheetsManager:
                 value = payload.get(header)
                 
                 # 特殊な型の処理
-                if isinstance(value, list):
-                    # リストはJSON形式で保存
-                    value = json.dumps(value, ensure_ascii=False)
+                if header == 'media_urls' and isinstance(value, list):
+                    # 画像URLをハイパーリンク形式に変換（Googleスプレッドシート用）
+                    hyperlinks = []
+                    for url in value[:5]:  # 最大5個
+                        # =HYPERLINK("URL", "表示テキスト") 形式
+                        hyperlinks.append(f'=HYPERLINK("{url}", "画像{len(hyperlinks)+1}")')
+                    value = '\n'.join(hyperlinks)  # 改行で区切る
+                elif isinstance(value, list):
+                    # その他のリストはJSON形式で保存
+                    if header == 'colors' and value:
+                        # カラーはカンマ区切りで表示
+                        value = ', '.join(value)
+                    else:
+                        value = json.dumps(value, ensure_ascii=False)
                 elif isinstance(value, dict):
                     # 辞書もJSON形式で保存
                     value = json.dumps(value, ensure_ascii=False)
@@ -366,29 +379,37 @@ class SyncManager:
         self._print_statistics()
     
     def _process_vehicle(self, slug: str, current: int, total: int):
-        """個別車両を処理"""
+        """個別車両を処理（トリム展開対応）"""
         try:
             print(f"  [{current}/{total}] {slug}...", end=" ")
             
             # スクレイピング
             raw_data = self.scraper.scrape_vehicle(slug)
             
-            # データ処理
-            payload = self.processor.process_vehicle_data(raw_data)
+            # データ処理（複数のペイロードが返される）
+            payloads = self.processor.process_vehicle_data(raw_data)
             
-            # 検証
-            is_valid, errors = self.validator.validate_payload(payload)
-            if not is_valid:
-                print(f"INVALID: {', '.join(errors)}")
-                self.stats['skipped'] += 1
-                return
+            if not isinstance(payloads, list):
+                payloads = [payloads]  # 後方互換性のため
             
-            # データベース同期
-            db_success = self.supabase.upsert(payload)
-            sheets_success = self.sheets.upsert(payload)
+            success = False
+            for payload in payloads:
+                # 検証
+                is_valid, errors = self.validator.validate_payload(payload)
+                if not is_valid:
+                    print(f"INVALID ({payload.get('trim_name', '')}): {', '.join(errors)}")
+                    self.stats['skipped'] += 1
+                    continue
+                
+                # データベース同期
+                db_success = self.supabase.upsert(payload)
+                sheets_success = self.sheets.upsert(payload)
+                
+                if db_success or sheets_success:
+                    success = True
             
-            if db_success or sheets_success:
-                print("OK")
+            if success:
+                print(f"OK ({len(payloads)} trims)")
                 self.stats['success'] += 1
             else:
                 print("FAILED")
