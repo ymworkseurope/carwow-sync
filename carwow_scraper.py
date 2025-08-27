@@ -299,12 +299,25 @@ class VehicleScraper:
         return {}
     
     def _extract_title(self, soup: BeautifulSoup, product: Dict) -> str:
-        """タイトルを取得（h1から正確に）"""
-        # h1タグから取得（最も信頼性が高い）
-        if h1 := soup.find('h1', class_='header__title'):
-            title = h1.get_text(strip=True)
-            # "Review & Prices"などを除去
-            title = re.sub(r'\s*(Review|Prices?|&).*
+    """タイトルを取得（h1から正確に）"""
+    # h1タグから取得（最も信頼性が高い）
+    if h1 := soup.find('h1', class_='header__title'):
+        title = h1.get_text(strip=True)
+        # "Review & Prices"などを除去
+        title = re.sub(r'\s*(Review|Prices?|&).*$', '', title, flags=re.IGNORECASE)
+        return title.strip()
+    
+    # 通常のh1
+    if h1 := soup.find('h1'):
+        title = h1.get_text(strip=True)
+        title = re.sub(r'\s*(review).*$', '', title, flags=re.IGNORECASE)
+        return title.strip()
+    
+    # productデータから
+    if title := product.get('name'):
+        return title
+    
+    return ""
     
     def _extract_overview(self, soup: BeautifulSoup, product: Dict) -> str:
         """概要文を取得（コンテンツエリアから）"""
