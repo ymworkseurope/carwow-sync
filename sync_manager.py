@@ -282,7 +282,7 @@ class GoogleSheetsManager:
             self.worksheet.update(
                 [row_data], 
                 range_name,
-                value_input_option='RAW'
+                value_input_option='USER_ENTERED'  # ハイパーリンク用に変更
             )
             
             return True
