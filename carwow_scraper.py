@@ -560,10 +560,48 @@ class VehicleScraper:
                 # 価格部分を除去（Free, £500など）
                 color = re.sub(r'(Free|£[\d,]+).*
     
+    def _scrape_specifications(self, slug: str) -> Dict:
+        """詳細スペックを取得（リダイレクト対応強化）"""
+        spec_data = {}
+        
+        try:
+            url = f"{BASE_URL}/{slug}/specifications"
+            response = self.client.get(url, allow_redirects=True)
+            
+            # リダイレクト先がメーカートップページの場合は無視
+            final_url = response.url
+            if f"/{slug.split('/')[0]}#" in final_url or final_url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
+                return {'specifications': {}}
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # テーブルから取得
+            for row in soup.select('table tr'):
+                cells = row.select('th, td')
+                if len(cells) >= 2:
+                    key = cells[0].get_text(strip=True).lower()
+                    value = cells[1].get_text(strip=True)
+                    spec_data[key] = value
+            
+            # dt/ddペアから取得
+            for dt in soup.select('dt'):
+                if dd := dt.find_next('dd'):
+                    key = dt.get_text(strip=True).lower()
+                    value = dd.get_text(strip=True)
+                    spec_data[key] = value
+            
+            # 寸法情報を構造化（多様なフォーマットに対応）
+            dimensions = self._extract_dimensions_from_spec(spec_data, soup.text)
+            if dimensions:
+                spec_data['dimensions_structured'] = dimensions
+            
+        except Exception as e:
+            print(f"  Warning: Failed to get specifications for {slug}: {e}")
+        
+        return {'specifications': spec_data}
+    
     def _scrape_trims_and_engines(self, slug: str) -> List[Dict]:
-        """トリムとエンジン情報を取得（specifications
-
-ページから）"""
+        """トリムとエンジン情報を取得（specificationsページから）"""
         trims = []
         
         try:
