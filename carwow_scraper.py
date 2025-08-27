@@ -708,7 +708,7 @@ class VehicleScraper:
            
            # 代替: シンプルなテキストベースの解析
            if not trims:
-               text = soup.           # 代替: シンプルなテキストベースの解析
+               text = soup.get_text()  # 代替: シンプルなテキストベースの解析
            if not trims:
                text = soup.get_text()
                if 'Trims and engines' in text:
