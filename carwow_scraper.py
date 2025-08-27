@@ -705,150 +705,150 @@ class VehicleScraper:
                 if match := re.search(r'(\d{3,4})', value):
                     dimensions['length'] = match.group(1)
             elif any(wk in key_lower for wk in WIDTH_KEYS):
-                         if match := re.search(r'(\d{3,4})', value):
-                   dimensions['width'] = match.group(1)
-           elif any(hk in key_lower for hk in HEIGHT_KEYS):
-               if match := re.search(r'(\d{3,4})', value):
-                   dimensions['height'] = match.group(1)
-       
-       # ページテキストから補完
-       if not all(dimensions.values()):
-           mm_values = re.findall(r'(\d{3,4})\s*mm', page_text)
-           if len(mm_values) >= 3:
-               if not dimensions['length']: dimensions['length'] = mm_values[0]
-               if not dimensions['width']: dimensions['width'] = mm_values[1]
-               if not dimensions['height']: dimensions['height'] = mm_values[2]
-       
-       if all(dimensions.values()):
-           return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
-       
-       return None
-   
-   def _determine_body_types(self, slug: str) -> List[str]:
-       """ボディタイプを推定"""
-       body_types = []
-       maker = slug.split('/')[0]
-       
-       categories = {
-           'SUV': 'suv',
-           'Electric': 'electric',
-           'Hybrid': 'hybrid',
-           'Convertible': 'convertible',
-           'Estate': 'estate',
-           'Hatchback': 'hatchback',
-           'Saloon': 'saloon',
-           'Coupe': 'coupe',
-           'Sports': 'sports'
-       }
-       
-       for body_type, category in categories.items():
-           try:
-               soup = self.client.get_soup(f"{BASE_URL}/{maker}/{category}")
-               model_part = slug.split('/')[-1] if '/' in slug else slug
-               
-               found = False
-               for link in soup.select('a[href]'):
-                   href = link.get('href', '')
-                   if f"/{slug}" in href or f"/{model_part}" in href:
-                       found = True
-                       break
-               
-               if found:
-                   body_types.append(body_type)
-                   
-           except Exception:
-               continue
-       
-       return body_types
-   
-   def _extract_number(self, text: str) -> Optional[int]:
-       """テキストから数値を抽出"""
-       if text is None:
-           return None
-       if match := re.search(r'\d+', str(text)):
-           return int(match.group())
-       return None
-   
-   def _is_valid_image_url(self, url: str) -> bool:
-       """有効な画像URLかチェック"""
-       if not url or not url.startswith('http'):
-           return False
-       
-       valid_domains = ['prismic.io', 'carwow', 'imgix.net', 'cloudinary.com']
-       return any(domain in url for domain in valid_domains)
+                if match := re.search(r'(\d{3,4})', value):
+                    dimensions['width'] = match.group(1)
+            elif any(hk in key_lower for hk in HEIGHT_KEYS):
+                if match := re.search(r'(\d{3,4})', value):
+                    dimensions['height'] = match.group(1)
+        
+        # ページテキストから補完
+        if not all(dimensions.values()):
+            mm_values = re.findall(r'(\d{3,4})\s*mm', page_text)
+            if len(mm_values) >= 3:
+                if not dimensions['length']: dimensions['length'] = mm_values[0]
+                if not dimensions['width']: dimensions['width'] = mm_values[1]
+                if not dimensions['height']: dimensions['height'] = mm_values[2]
+        
+        if all(dimensions.values()):
+            return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
+        
+        return None
+    
+    def _determine_body_types(self, slug: str) -> List[str]:
+        """ボディタイプを推定"""
+        body_types = []
+        maker = slug.split('/')[0]
+        
+        categories = {
+            'SUV': 'suv',
+            'Electric': 'electric',
+            'Hybrid': 'hybrid',
+            'Convertible': 'convertible',
+            'Estate': 'estate',
+            'Hatchback': 'hatchback',
+            'Saloon': 'saloon',
+            'Coupe': 'coupe',
+            'Sports': 'sports'
+        }
+        
+        for body_type, category in categories.items():
+            try:
+                soup = self.client.get_soup(f"{BASE_URL}/{maker}/{category}")
+                model_part = slug.split('/')[-1] if '/' in slug else slug
+                
+                found = False
+                for link in soup.select('a[href]'):
+                    href = link.get('href', '')
+                    if f"/{slug}" in href or f"/{model_part}" in href:
+                        found = True
+                        break
+                
+                if found:
+                    body_types.append(body_type)
+                    
+            except Exception:
+                continue
+        
+        return body_types
+    
+    def _extract_number(self, text: str) -> Optional[int]:
+        """テキストから数値を抽出"""
+        if text is None:
+            return None
+        if match := re.search(r'\d+', str(text)):
+            return int(match.group())
+        return None
+    
+    def _is_valid_image_url(self, url: str) -> bool:
+        """有効な画像URLかチェック"""
+        if not url or not url.startswith('http'):
+            return False
+        
+        valid_domains = ['prismic.io', 'carwow', 'imgix.net', 'cloudinary.com']
+        return any(domain in url for domain in valid_domains)
 
 # ======================== Main Scraper Class ========================
 class CarwowScraper:
-   """Carwowスクレイパーのメインクラス"""
-   
-   def __init__(self):
-       self.maker_discovery = MakerDiscovery()
-       self.model_discovery = ModelDiscovery()
-       self.vehicle_scraper = VehicleScraper()
-   
-   def get_all_makers(self) -> List[str]:
-       """全メーカーを取得"""
-       return self.maker_discovery.get_all_makers()
-   
-   def get_models_for_maker(self, maker: str) -> List[str]:
-       """指定メーカーの全モデルを取得"""
-       return self.model_discovery.get_models_for_maker(maker)
-   
-   def scrape_vehicle(self, slug: str) -> Dict:
-       """車両データを取得"""
-       return self.vehicle_scraper.scrape_vehicle(slug)
-   
-   def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
-       """全車両データを取得"""
-       if makers is None:
-           makers = self.get_all_makers()
-       
-       all_vehicles = []
-       
-       for maker in makers:
-           print(f"Processing maker: {maker}")
-           models = self.get_models_for_maker(maker)
-           
-           for model_slug in models:
-               try:
-                   print(f"  Scraping: {model_slug}")
-                   vehicle_data = self.scrape_vehicle(model_slug)
-                   all_vehicles.append(vehicle_data)
-                   
-                   time.sleep(random.uniform(0.5, 1.5))
-                   
-               except Exception as e:
-                   print(f"  Error scraping {model_slug}: {e}")
-                   continue
-       
-       return all_vehicles
+    """Carwowスクレイパーのメインクラス"""
+    
+    def __init__(self):
+        self.maker_discovery = MakerDiscovery()
+        self.model_discovery = ModelDiscovery()
+        self.vehicle_scraper = VehicleScraper()
+    
+    def get_all_makers(self) -> List[str]:
+        """全メーカーを取得"""
+        return self.maker_discovery.get_all_makers()
+    
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """指定メーカーの全モデルを取得"""
+        return self.model_discovery.get_models_for_maker(maker)
+    
+    def scrape_vehicle(self, slug: str) -> Dict:
+        """車両データを取得"""
+        return self.vehicle_scraper.scrape_vehicle(slug)
+    
+    def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
+        """全車両データを取得"""
+        if makers is None:
+            makers = self.get_all_makers()
+        
+        all_vehicles = []
+        
+        for maker in makers:
+            print(f"Processing maker: {maker}")
+            models = self.get_models_for_maker(maker)
+            
+            for model_slug in models:
+                try:
+                    print(f"  Scraping: {model_slug}")
+                    vehicle_data = self.scrape_vehicle(model_slug)
+                    all_vehicles.append(vehicle_data)
+                    
+                    time.sleep(random.uniform(0.5, 1.5))
+                    
+                except Exception as e:
+                    print(f"  Error scraping {model_slug}: {e}")
+                    continue
+        
+        return all_vehicles
 
 # ======================== Utility Functions ========================
 def test_scraper():
-   """スクレイパーのテスト"""
-   scraper = CarwowScraper()
-   
-   # メーカー取得テスト
-   print("Testing maker discovery...")
-   makers = scraper.get_all_makers()
-   print(f"Found {len(makers)} makers: {makers[:5]}...")
-   
-   # モデル取得テスト
-   print("\nTesting model discovery for 'audi'...")
-   models = scraper.get_models_for_maker('audi')
-   print(f"Found {len(models)} models: {models[:5]}...")
-   
-   # 車両データ取得テスト
-   if models:
-       print(f"\nTesting vehicle scrape for '{models[0]}'...")
-       vehicle = scraper.scrape_vehicle(models[0])
-       print(f"Title: {vehicle.get('title')}")
-       print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
-       print(f"Body types: {vehicle.get('body_types')}")
-       print(f"Trims: {len(vehicle.get('trims', []))} found")
-       for trim in vehicle.get('trims', []):
-           print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
+    """スクレイパーのテスト"""
+    scraper = CarwowScraper()
+    
+    # メーカー取得テスト
+    print("Testing maker discovery...")
+    makers = scraper.get_all_makers()
+    print(f"Found {len(makers)} makers: {makers[:5]}...")
+    
+    # モデル取得テスト
+    print("\nTesting model discovery for 'audi'...")
+    models = scraper.get_models_for_maker('audi')
+    print(f"Found {len(models)} models: {models[:5]}...")
+    
+    # 車両データ取得テスト
+    if models:
+        print(f"\nTesting vehicle scrape for '{models[0]}'...")
+        vehicle = scraper.scrape_vehicle(models[0])
+        print(f"Title: {vehicle.get('title')}")
+        print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
+        print(f"Body types: {vehicle.get('body_types')}")
+        print(f"Trims: {len(vehicle.get('trims', []))} found")
+        for trim in vehicle.get('trims', []):
+            print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
 
 
 if __name__ == "__main__":
-   test_scraper()      
+    test_scraper()
