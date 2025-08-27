@@ -36,7 +36,7 @@ GS_SHEET_ID = os.getenv("GS_SHEET_ID")
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
-    "trim_name", "body_type", "body_type_ja", "fuel", "fuel_ja",
+    "trim_name", "grade", "engine", "body_type", "body_type_ja", "fuel", "fuel_ja",
     "transmission", "transmission_ja",
     "price_min_gbp", "price_max_gbp", "price_used_gbp",
     "price_min_jpy", "price_max_jpy", "price_used_jpy",
@@ -60,7 +60,7 @@ class SupabaseManager:
             print("Warning: Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（media_urls修正版）"""
+        """データをUPSERT（テーブル名修正版）"""
         if not self.enabled:
             return False
         
@@ -72,9 +72,9 @@ class SupabaseManager:
                 'Prefer': 'resolution=merge-duplicates'
             }
             
-            # UPSERTリクエスト
+            # テーブル名を正しく設定
             response = requests.post(
-                f"{self.url}/rest/v1/vehicles",
+                f"{self.url}/rest/v1/system_cars",  # vehiclesではなくsystem_cars
                 headers=headers,
                 json=payload,
                 timeout=30
@@ -201,61 +201,67 @@ class GoogleSheetsManager:
             traceback.print_exc()
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（既存列を保持）"""
+        """データをUPSERT（media_urls修正版）"""
         if not self.enabled:
             return False
         
         try:
             # スラッグで既存行を検索
             slug = payload.get('slug')
+            trim_name = payload.get('trim_name', 'Standard')
+            
             if not slug:
                 return False
             
+            # ユニークキーとしてslug + trim_nameを使用
+            unique_key = f"{slug}_{trim_name}"
+            
             # 既存データ検索
             try:
-                # slug列を特定
                 if 'slug' in self.headers:
                     slug_col = self.headers.index('slug') + 1
                     slug_values = self.worksheet.col_values(slug_col)
                     
-                    if slug in slug_values:
-                        row_num = slug_values.index(slug) + 1
-                    else:
-                        # 新規追加（最終行の次）
+                    # trim_name列も確認
+                    trim_col = self.headers.index('trim_name') + 1 if 'trim_name' in self.headers else -1
+                    
+                    row_num = None
+                    if trim_col > 0:
+                        trim_values = self.worksheet.col_values(trim_col)
+                        # slug + trim_nameで検索
+                        for i, (s, t) in enumerate(zip(slug_values[1:], trim_values[1:]), start=2):
+                            if s == slug and t == trim_name:
+                                row_num = i
+                                break
+                    
+                    if not row_num:
+                        # 新規追加
                         row_num = len(slug_values) + 1
                 else:
-                    # slug列がない場合はエラー
                     print(f"Error: 'slug' column not found in headers")
                     return False
                     
             except Exception as e:
                 print(f"Error searching for existing row: {e}")
-                # エラーの場合は新規追加
                 all_values = self.worksheet.get_all_values()
                 row_num = len(all_values) + 1
             
-            # 行データ作成（既存列の順序を保持）
+            # 行データ作成
             row_data = []
             for header in self.headers:
                 value = payload.get(header)
                 
-                # 特殊な型の処理
+                # media_urlsの処理（単純なURL文字列として保存）
                 if header == 'media_urls' and isinstance(value, list):
-                    # 画像URLをハイパーリンク形式に変換（Googleスプレッドシート用）
-                    hyperlinks = []
-                    for url in value[:5]:  # 最大5個
-                        # =HYPERLINK("URL", "表示テキスト") 形式
-                        hyperlinks.append(f'=HYPERLINK("{url}", "画像{len(hyperlinks)+1}")')
-                    value = '\n'.join(hyperlinks)  # 改行で区切る
+                    # 最初の5つのURLをカンマ区切りで保存
+                    value = ', '.join(value[:5])
                 elif isinstance(value, list):
                     # その他のリストはJSON形式で保存
                     if header == 'colors' and value:
-                        # カラーはカンマ区切りで表示
                         value = ', '.join(value)
                     else:
                         value = json.dumps(value, ensure_ascii=False)
                 elif isinstance(value, dict):
-                    # 辞書もJSON形式で保存
                     value = json.dumps(value, ensure_ascii=False)
                 elif value is None:
                     value = ""
@@ -264,15 +270,14 @@ class GoogleSheetsManager:
                 
                 row_data.append(value)
             
-            # データ更新（列数が多い場合に対応）
+            # データ更新
             end_col = self._get_column_letter(len(self.headers))
             range_name = f"A{row_num}:{end_col}{row_num}"
             
-            # バッチ更新を使用して効率化
             self.worksheet.update(
                 [row_data], 
                 range_name,
-                value_input_option='USER_ENTERED'  # ハイパーリンク用に変更
+                value_input_option='RAW'  # RAWに変更してFALSE問題を回避
             )
             
             return True
@@ -380,7 +385,7 @@ class SyncManager:
             payloads = self.processor.process_vehicle_data(raw_data)
             
             if not isinstance(payloads, list):
-                payloads = [payloads]  # 後方互換性のため
+                payloads = [payloads]
             
             success = False
             for payload in payloads:
@@ -407,7 +412,6 @@ class SyncManager:
                 
         except Exception as e:
             error_msg = str(e)
-            # エラーメッセージを短縮して表示
             if "Not a valid model page" in error_msg:
                 print("ERROR: Not a valid model page")
             else:
@@ -427,7 +431,6 @@ class SyncManager:
         
         if self.stats['errors']:
             print(f"\nErrors ({len(self.stats['errors'])} total):")
-            # エラーを種類別に集計
             error_types = {}
             for error in self.stats['errors']:
                 if "Not a valid model page" in error:
@@ -447,7 +450,6 @@ class SyncManager:
                     for slug in slugs:
                         print(f"    - {slug}")
         
-        # 成功率
         if self.stats['total'] > 0:
             success_rate = (self.stats['success'] / self.stats['total']) * 100
             print(f"\nSuccess rate: {success_rate:.1f}%")
@@ -492,21 +494,16 @@ def main():
     
     args = parser.parse_args()
     
-    # テストモード
     if args.test:
         args.limit = 5
         print("Running in TEST mode (limit=5)")
     
-    # 同期マネージャー初期化
     manager = SyncManager()
     
-    # 実行
     try:
         if args.models:
-            # 特定モデルの処理
             manager.sync_specific(args.models)
         else:
-            # メーカー単位の処理
             manager.sync_all(makers=args.makers, limit=args.limit)
     
     except KeyboardInterrupt:
