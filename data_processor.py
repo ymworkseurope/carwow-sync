@@ -1,5 +1,5 @@
 @staticmethod
-   def translate_fuel(fuel_en: str) -> str:
+def translate_fuel(fuel_en: str) -> str:
         """燃料タイプを日本語に変換"""
         if not fuel_en:
             return ""
