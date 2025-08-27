@@ -571,7 +571,7 @@ class VehicleScraper:
                 
                 color = element.get_text(strip=True)
                 # 価格部分を除去（Free, £500など）
-                color = re.sub(r'(Free|£[\d,]+).*
+                color = re.sub(r'(Free|£[\d,]+).*$', '', color).strip()
     
     def _scrape_specifications(self, slug: str) -> Dict:
         """詳細スペックを取得（リダイレクト対応強化）"""
