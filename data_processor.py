@@ -4,6 +4,7 @@ data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
 """
 import os
+import re
 import json
 import uuid
 import requests
@@ -249,7 +250,7 @@ class DataProcessor:
             vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, trim_id))
             
             # トリム固有情報
-            trim_name = trim.get('trim_name', 'Standard')
+            trim_name = self._clean_trim_name(trim.get('trim_name', 'Standard'))
             engine = trim.get('engine', '')
             
             # トランスミッション処理
@@ -264,21 +265,27 @@ class DataProcessor:
             drive_en = trim.get('drive_type', '')
             drive_ja = self.translator.translate_drive_type(drive_en)
             
-            # full_model_jaの生成（余計な文字を除去）
-            trim_name_clean = self._clean_trim_name(trim_name)
+            # full_model_jaの生成
             full_model_parts = [make_ja, model_en]
-            if trim_name_clean and trim_name_clean != 'Standard':
-                full_model_parts.append(trim_name_clean)
+            if trim_name and trim_name != 'Standard':
+                full_model_parts.append(trim_name)
             full_model_ja = ' '.join(full_model_parts)
             
             # スペック情報の整理
             spec_json = self._compile_specifications(raw_data)
             spec_json.update({
-                'trim_info': trim,
+                'trim_info': {
+                    'trim_name': trim_name,
+                    'engine': engine,
+                    'fuel_type': fuel_en,
+                    'power_bhp': trim.get('power_bhp'),
+                    'transmission': transmission_en,
+                    'drive_type': drive_en
+                },
                 'doors': doors,
                 'seats': seats,
-                'grade': trim_name,  # gradeとして追加
-                'engine': engine      # engineとして追加
+                'grade': trim_name,
+                'engine': engine
             })
             
             payload = {
@@ -342,13 +349,27 @@ class DataProcessor:
         return make.title()
     
     def _clean_trim_name(self, trim_name: str) -> str:
-        """トリム名のクリーニング（余計な文字を除去）"""
+        """トリム名のクリーニング"""
         if not trim_name:
-            return ""
+            return "Standard"
         
-        # "0 s", "2 s"などの不要な文字列を除去
-        cleaned = re.sub(r'\b\d+\s*s\b', '', trim_name)
+        # 不要なパターンを除去
+        patterns_to_remove = [
+            r'\b\d+\s*s\b',      # "0 s", "2 s" など
+            r'^\d+\s+',           # 先頭の数字
+            r'\s+\d+$',           # 末尾の数字
+            r'^0\s',              # 先頭の"0 "
+        ]
+        
+        cleaned = trim_name
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
         cleaned = cleaned.strip()
+        
+        # 空になった場合や無効な値の場合はStandardを返す
+        if not cleaned or cleaned in ['s', 'S', '0']:
+            return 'Standard'
         
         return cleaned
     
