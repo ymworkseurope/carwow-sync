@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 data_processor.py
-データ変換、翻訳、価格換算などの処理モジュール - 修正版
+データ変換、翻訳、価格換算などの処理モジュール - 完全修正版
 """
 import os
 import re
@@ -228,20 +228,20 @@ class DataProcessor:
         price_max_jpy = self._convert_to_jpy_int(price_max_gbp)
         price_used_jpy = self._convert_to_jpy_int(price_used_gbp)
         
-        # doors/seatsを取得 - smallintに合わせて型変更
+        # doors/seatsを取得
         doors = self._safe_smallint(raw_data.get('doors'))
         seats = self._safe_smallint(raw_data.get('seats'))
         
-        # カラー処理 - 配列として適切に処理
+        # カラー処理
         colors = self._process_array_field(raw_data.get('colors', []))
         
-        # メディアURL処理 - 配列として適切に処理
+        # メディアURL処理
         media_urls = self._process_media_urls(raw_data.get('images', []))
         
         # 寸法情報の処理（共通）
         dimensions_processed = self._extract_and_format_dimensions(raw_data)
         
-        # トリム情報を取得（実際に見つかったもののみ）
+        # トリム情報を取得
         trims = raw_data.get('trims', [])
         
         # トリムデータの検証とフィルタリング
@@ -249,10 +249,8 @@ class DataProcessor:
         for trim in trims:
             trim_name = self._clean_trim_name_for_grade(trim.get('trim_name', ''))
             if self._is_valid_trim_name_for_processing(trim_name) and trim_name != 'Standard':
-                trim['trim_name'] = trim_name  # クリーンアップしたトリム名で更新
+                trim['trim_name'] = trim_name
                 valid_trims.append(trim)
-        
-        # 有効なトリムがない場合は空のリストのまま（無しとして扱う）
         
         # グレードとエンジン情報の収集
         all_grades = self._collect_grades(valid_trims)
@@ -262,9 +260,9 @@ class DataProcessor:
         if valid_trims:
             print(f"  Found {len(valid_trims)} valid trims: {[t.get('trim_name', 'Unknown') for t in valid_trims]}")
         else:
-            print(f"  No valid trims found")
+            print("  No valid trims found")
         
-        # 車両データを1つのペイロードとして作成（トリム情報は grades に含める）
+        # 車両データを1つのペイロードとして作成
         vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, raw_data['slug']))
         
         # トランスミッション処理（メインデータから）
@@ -282,10 +280,9 @@ class DataProcessor:
         # full_model_jaの生成
         full_model_ja = f"{make_ja} {model_en}"
         
-        # power_bhp - integerタイプに合わせて変更
+        # power_bhp
         power_bhp = None
         if valid_trims:
-            # トリムがある場合は最初のトリムのpower_bhpを使用
             power_bhp = self._safe_int(valid_trims[0].get('power_bhp'))
         
         # グレード名の決定 - トリムが見つからない場合は「無し」
@@ -301,17 +298,15 @@ class DataProcessor:
             # power_bhpを更新
             power_bhp = self._safe_int(representative_trim.get('power_bhp'))
             
-            # 代表トリムのトランスミッション情報があれば使用
+            # 代表トリムの情報があれば使用
             if representative_trim.get('transmission'):
                 transmission_en = representative_trim.get('transmission', '')
                 transmission_ja = self.translator.translate_transmission(transmission_en)
             
-            # 代表トリムの燃料情報があれば使用
             if representative_trim.get('fuel_type'):
                 fuel_en = representative_trim.get('fuel_type', '')
                 fuel_ja = self.translator.translate_fuel(fuel_en)
             
-            # 代表トリムのドライブタイプ情報があれば使用
             if representative_trim.get('drive_type'):
                 drive_en = representative_trim.get('drive_type', '')
                 drive_ja = self.translator.translate_drive_type(drive_en)
@@ -333,7 +328,7 @@ class DataProcessor:
             'model_en': model_en,
             'make_ja': make_ja,
             'model_ja': model_ja,
-            'body_type': body_types_en,  # 配列として保持
+            'body_type': body_types_en,
             'fuel': fuel_en,
             'price_min_gbp': price_min_gbp,
             'price_max_gbp': price_max_gbp,
@@ -341,19 +336,19 @@ class DataProcessor:
             'price_max_jpy': price_max_jpy,
             'overview_en': raw_data.get('overview', ''),
             'overview_ja': overview_ja,
-            'spec_json': spec_json,  # JSONBとして保存
-            'media_urls': media_urls,  # 配列として保持
-            'updated_at': datetime.utcnow().isoformat() + 'Z',  # ISO文字列に変換
-            'body_type_ja': body_types_ja,  # 配列として保持
+            'spec_json': spec_json,
+            'media_urls': media_urls,
+            'updated_at': datetime.utcnow().isoformat() + 'Z',
+            'body_type_ja': body_types_ja,
             'catalog_url': raw_data.get('url'),
-            'grades': all_grades,  # JSONBとして新規追加
-            'engines': all_engines,  # JSONBとして新規追加
+            'grades': all_grades,
+            'engines': all_engines,
             'doors': doors,
             'seats': seats,
             'dimensions_mm': dimensions_processed,
             'drive_type': drive_en,
             'full_model_ja': full_model_ja,
-            'colors': colors,  # 配列として保持
+            'colors': colors,
             'drive_type_ja': drive_ja,
             'price_used_gbp': price_used_gbp,
             'price_used_jpy': price_used_jpy,
@@ -373,12 +368,12 @@ class DataProcessor:
             return None
         
         if isinstance(value, (int, float)):
-            return int(value)  # floatの場合は整数部分のみ
+            return int(value)
         
         if isinstance(value, str):
             cleaned = value.replace(',', '').replace('£', '').replace('¥', '')
             try:
-                return int(float(cleaned))  # floatを経由して整数に変換
+                return int(float(cleaned))
             except (ValueError, TypeError):
                 pass
         
@@ -397,7 +392,7 @@ class DataProcessor:
         for trim in trims:
             trim_name = trim.get('trim_name', 'Standard')
             if trim_name == 'Standard':
-                continue  # Standardは除外
+                continue
                 
             grade_info = {
                 'name': trim_name,
@@ -471,7 +466,7 @@ class DataProcessor:
         for dim_type, keys in dimension_keys.items():
             for key in keys:
                 if key.lower() in [k.lower() for k in spec_data.keys()]:
-                    # 実際のキーを見つける（大文字小文字を考慮）
+                    # 実際のキーを見つける
                     actual_key = next(k for k in spec_data.keys() if k.lower() == key.lower())
                     value = self._extract_dimension_value(spec_data[actual_key])
                     if value:
@@ -547,7 +542,6 @@ class DataProcessor:
             return int(value)
         
         if isinstance(value, str):
-            # 数値を抽出（mm, cm, m単位も考慮）
             import re
             
             # mm単位の場合
@@ -583,15 +577,12 @@ class DataProcessor:
             return []
         
         import re
-        # "4,973 mm x 1,931 mm x 1,498 mm" や "4973 x 1931 x 1498" のような形式に対応
         numbers = re.findall(r'(\d{1,2}[,.]?\d{3,4})', dim_string)
         
         result = []
         for num_str in numbers:
-            # カンマや小数点を除去
             clean_num = num_str.replace(',', '').replace('.', '')
             try:
-                # 3桁以上の数値のみ採用（車の寸法として妥当）
                 if len(clean_num) >= 3:
                     result.append(int(clean_num))
             except ValueError:
@@ -608,7 +599,6 @@ class DataProcessor:
             return [str(item) for item in field_data if item]
         
         if isinstance(field_data, str):
-            # カンマ区切りの文字列を配列に変換
             return [item.strip() for item in field_data.split(',') if item.strip()]
         
         return []
@@ -620,7 +610,6 @@ class DataProcessor:
         
         try:
             num = int(float(str(value).replace(',', '')))
-            # smallintの範囲チェック (-32768 to 32767)
             if -32768 <= num <= 32767:
                 return num
         except (ValueError, TypeError):
@@ -635,9 +624,9 @@ class DataProcessor:
         
         # 無効なパターンを除外
         invalid_patterns = [
-            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
-            r'^s$',         # "s" のみ
-            r'^\W+$',       # 記号のみ
+            r'^\d+\s*s?$',
+            r'^s$',
+            r'^\W+$',
         ]
         
         for pattern in invalid_patterns:
@@ -665,19 +654,18 @@ class DataProcessor:
         return make.title()
     
     def _clean_trim_name_for_grade(self, trim_name: str) -> str:
-        """グレード用のトリム名のクリーニング（改良版）"""
+        """グレード用のトリム名のクリーニング"""
         if not trim_name:
             return "無し"
         
-        # 前後の空白を除去
         cleaned = trim_name.strip()
         
         # 無効なパターンをチェック
         invalid_patterns = [
-            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
-            r'^s$',         # "s" のみ
-            r'^0\s',        # "0 " で始まる
-            r'^standard$',  # "standard"（大文字小文字問わず）
+            r'^\d+\s*s?$',
+            r'^s$',
+            r'^0\s',
+            r'^standard$',
         ]
         
         for pattern in invalid_patterns:
@@ -686,9 +674,9 @@ class DataProcessor:
         
         # 不要な部分を除去
         patterns_to_remove = [
-            r'\b\d+\s*s\b',      # "2 s", "0 s" など
-            r'^\d+\s+',          # 先頭の数字とスペース
-            r'\s+\d+,          # 末尾のスペースと数字
+            r'\b\d+\s*s\b',
+            r'^\d+\s+',
+            r'\s+\d+$',
         ]
         
         for pattern in patterns_to_remove:
@@ -696,7 +684,6 @@ class DataProcessor:
         
         cleaned = cleaned.strip()
         
-        # 最終チェック: 空文字や短すぎる場合
         if not cleaned or len(cleaned) < 2:
             return "無し"
         
@@ -723,7 +710,6 @@ class DataProcessor:
         """スペック情報をまとめる"""
         specs = raw_data.get('specifications', {}).copy()
         
-        # 基本スペックを追加
         specs.update({
             'fuel_type': raw_data.get('fuel_type'),
             'doors': raw_data.get('doors'),
@@ -731,7 +717,6 @@ class DataProcessor:
             'transmission': raw_data.get('transmission')
         })
         
-        # Noneの値を除去
         specs = {k: v for k, v in specs.items() if v is not None}
         
         return specs
@@ -745,11 +730,9 @@ class DataProcessor:
             if not url:
                 continue
                 
-            # 正規化
             if '?' in url:
                 url = url.split('?')[0]
             
-            # 重複チェック
             if url not in seen:
                 processed.append(url)
                 seen.add(url)
@@ -765,7 +748,6 @@ class DataValidator:
         """データの妥当性を検証"""
         errors = []
         
-        # 必須フィールドのチェック
         required_fields = ['id', 'slug', 'make_en', 'model_en']
         for field in required_fields:
             if not payload.get(field):
@@ -905,16 +887,7 @@ class DataValidator:
 
 # ======================== Helper Functions ========================
 def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True) -> Dict:
-    """
-    バッチデータの処理
-    
-    Args:
-        raw_data_list: 生データのリスト
-        validator_enabled: バリデーション有効フラグ
-    
-    Returns:
-        処理結果の辞書 (success_count, error_count, payloads, errors)
-    """
+    """バッチデータの処理"""
     processor = DataProcessor()
     validator = DataValidator()
     
@@ -957,16 +930,7 @@ def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True
     }
 
 def validate_against_schema(payloads: List[Dict], table_schema: List[Dict]) -> Dict:
-    """
-    テーブルスキーマに対するバリデーション
-    
-    Args:
-        payloads: ペイロードのリスト
-        table_schema: テーブルスキーマの定義
-    
-    Returns:
-        バリデーション結果
-    """
+    """テーブルスキーマに対するバリデーション"""
     validator = DataValidator()
     valid_payloads = []
     schema_errors = []
