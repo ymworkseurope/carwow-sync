@@ -4,6 +4,7 @@ data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
 """
 import json
+import os  # Added import for os
 import uuid
 import requests
 from datetime import datetime
@@ -189,9 +190,9 @@ class DataProcessor:
         # トリムデータの検証
         valid_trims = [trim for trim in trims if self._is_valid_trim_name_for_processing(trim.get('trim_name', ''))]
         
-        # 有効なトリムがない場合は無し
+        # 有効なトリムがない場合はStandard
         if not valid_trims:
-            valid_trims = [{'trim_name': '無し'}]
+            valid_trims = [{'trim_name': 'Standard'}]
         
         # グレード情報の収集
         all_grades = self._collect_grades(valid_trims)
