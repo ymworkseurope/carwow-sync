@@ -60,7 +60,7 @@ class SupabaseManager:
             print("Warning: Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（テーブル名修正版）"""
+        """データをUPSERT"""
         if not self.enabled:
             return False
         
@@ -72,9 +72,9 @@ class SupabaseManager:
                 'Prefer': 'resolution=merge-duplicates'
             }
             
-            # テーブル名を正しく設定 - 'cars'に変更（既存テーブル名に合わせる）
+            # 正しいテーブル名を使用
             response = requests.post(
-                f"{self.url}/rest/v1/cars",  # system_carsではなくcarsに変更
+                f"{self.url}/rest/v1/system_cars",
                 headers=headers,
                 json=payload,
                 timeout=30
@@ -101,7 +101,7 @@ class GoogleSheetsManager:
         self._initialize()
     
     def _get_column_letter(self, col_num: int) -> str:
-        """列番号を列文字に変換（AA, AB, AC...対応）"""
+        """列番号を列文字に変換"""
         letters = ''
         while col_num > 0:
             col_num -= 1
@@ -140,10 +140,8 @@ class GoogleSheetsManager:
             # ワークシート取得または作成
             try:
                 self.worksheet = spreadsheet.worksheet(SHEET_NAME)
-                # 既存のヘッダーを取得
                 self.headers = self.worksheet.row_values(1)
                 if not self.headers:
-                    # ヘッダーがない場合は初期設定
                     self.headers = SHEET_HEADERS
                     self.worksheet.update([self.headers], "A1")
             except gspread.WorksheetNotFound:
@@ -152,11 +150,10 @@ class GoogleSheetsManager:
                     rows=1000,
                     cols=len(SHEET_HEADERS)
                 )
-                # ヘッダー設定
                 self.headers = SHEET_HEADERS
                 self.worksheet.update([self.headers], "A1")
             
-            # 必要な列を追加（既存列は保持）
+            # 必要な列を追加
             self._ensure_required_columns()
             
             self.enabled = True
@@ -168,29 +165,24 @@ class GoogleSheetsManager:
             self.enabled = False
     
     def _ensure_required_columns(self):
-        """必要な列を追加（既存列は保持）"""
+        """必要な列を追加"""
         if not self.enabled:
             return
         
         try:
-            # 既存のヘッダーを取得
             current_headers = self.worksheet.row_values(1)
             
-            # 必要な列で不足しているものを特定
             missing_columns = []
             for required_col in SHEET_HEADERS:
                 if required_col not in current_headers:
                     missing_columns.append(required_col)
             
             if missing_columns:
-                # 新しいヘッダー（既存 + 不足分）
                 new_headers = current_headers + missing_columns
                 
-                # ワークシートのサイズを拡張
                 if len(new_headers) > self.worksheet.col_count:
                     self.worksheet.resize(cols=len(new_headers))
                 
-                # ヘッダーを更新
                 self.worksheet.update([new_headers], f"A1:{self._get_column_letter(len(new_headers))}1")
                 self.headers = new_headers
                 
@@ -201,12 +193,11 @@ class GoogleSheetsManager:
             traceback.print_exc()
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（media_urls修正版）"""
+        """データをUPSERT"""
         if not self.enabled:
             return False
         
         try:
-            # スラッグで既存行を検索
             slug = payload.get('slug')
             trim_name = payload.get('trim_name', 'Standard')
             
@@ -218,28 +209,24 @@ class GoogleSheetsManager:
             
             # 既存データ検索
             try:
-                if 'slug' in self.headers:
+                if 'slug' in self.headers and 'trim_name' in self.headers:
                     slug_col = self.headers.index('slug') + 1
-                    slug_values = self.worksheet.col_values(slug_col)
+                    trim_col = self.headers.index('trim_name') + 1
                     
-                    # trim_name列も確認
-                    trim_col = self.headers.index('trim_name') + 1 if 'trim_name' in self.headers else -1
+                    all_values = self.worksheet.get_all_values()
                     
                     row_num = None
-                    if trim_col > 0:
-                        trim_values = self.worksheet.col_values(trim_col)
-                        # slug + trim_nameで検索
-                        for i, (s, t) in enumerate(zip(slug_values[1:], trim_values[1:]), start=2):
-                            if s == slug and t == trim_name:
+                    for i, row in enumerate(all_values[1:], start=2):
+                        if len(row) > max(slug_col-1, trim_col-1):
+                            if row[slug_col-1] == slug and row[trim_col-1] == trim_name:
                                 row_num = i
                                 break
                     
                     if not row_num:
-                        # 新規追加
-                        row_num = len(slug_values) + 1
+                        row_num = len(all_values) + 1
                 else:
-                    print(f"Error: 'slug' column not found in headers")
-                    return False
+                    all_values = self.worksheet.get_all_values()
+                    row_num = len(all_values) + 1
                     
             except Exception as e:
                 print(f"Error searching for existing row: {e}")
@@ -251,16 +238,14 @@ class GoogleSheetsManager:
             for header in self.headers:
                 value = payload.get(header)
                 
-                # media_urlsの処理（単純なURL文字列として保存）
+                # media_urlsの処理 - 制限を削除してすべてのURLを保存
                 if header == 'media_urls' and isinstance(value, list):
-                    # 最初の5つのURLをカンマ区切りで保存
-                    value = ', '.join(value[:5])
+                    # 全てのURLをカンマ区切りで保存（制限なし）
+                    value = ', '.join(value) if value else ''
+                elif header == 'colors' and isinstance(value, list):
+                    value = ', '.join(value) if value else ''
                 elif isinstance(value, list):
-                    # その他のリストはJSON形式で保存
-                    if header == 'colors' and value:
-                        value = ', '.join(value)
-                    else:
-                        value = json.dumps(value, ensure_ascii=False)
+                    value = json.dumps(value, ensure_ascii=False)
                 elif isinstance(value, dict):
                     value = json.dumps(value, ensure_ascii=False)
                 elif value is None:
@@ -277,7 +262,7 @@ class GoogleSheetsManager:
             self.worksheet.update(
                 [row_data], 
                 range_name,
-                value_input_option='RAW'  # RAWに変更してFALSE問題を回避
+                value_input_option='RAW'
             )
             
             return True
@@ -296,7 +281,7 @@ class GoogleSheetsManager:
         for payload in payloads:
             if self.upsert(payload):
                 success_count += 1
-            time.sleep(0.5)  # API制限対策
+            time.sleep(0.5)
         
         return success_count
 
@@ -311,7 +296,6 @@ class SyncManager:
         self.supabase = SupabaseManager()
         self.sheets = GoogleSheetsManager()
         
-        # 統計情報
         self.stats = {
             'total': 0,
             'success': 0,
@@ -327,15 +311,12 @@ class SyncManager:
         print(f"Time: {datetime.now().isoformat()}")
         print("=" * 60)
         
-        # メーカーリスト取得
         if makers is None:
             makers = self.scraper.get_all_makers()
-            # editorialなど無効なメーカーを除外
             makers = [m for m in makers if m not in ['editorial', 'leasing', 'jaecoo', 'omoda']]
         
         print(f"Processing {len(makers)} makers")
         
-        # 各メーカーを処理
         for maker_idx, maker in enumerate(makers):
             print(f"\n[{maker_idx + 1}/{len(makers)}] Processing: {maker}")
             
@@ -343,7 +324,6 @@ class SyncManager:
                 models = self.scraper.get_models_for_maker(maker)
                 print(f"  Found {len(models)} models")
                 
-                # 各モデルを処理
                 for model_idx, model_slug in enumerate(models):
                     if limit and self.stats['total'] >= limit:
                         print("\nReached limit, stopping...")
@@ -352,14 +332,12 @@ class SyncManager:
                     self.stats['total'] += 1
                     self._process_vehicle(model_slug, model_idx + 1, len(models))
                     
-                    # レート制限対策
                     time.sleep(0.5)
                     
             except Exception as e:
                 print(f"  Error processing maker {maker}: {e}")
                 self.stats['errors'].append(f"Maker {maker}: {str(e)}")
         
-        # 統計表示
         self._print_statistics()
     
     def sync_specific(self, slugs: List[str]):
@@ -374,7 +352,7 @@ class SyncManager:
         self._print_statistics()
     
     def _process_vehicle(self, slug: str, current: int, total: int):
-        """個別車両を処理（トリム展開対応）"""
+        """個別車両を処理"""
         try:
             print(f"  [{current}/{total}] {slug}...", end=" ")
             
