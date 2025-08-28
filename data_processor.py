@@ -252,9 +252,9 @@ class DataProcessor:
                 trim['trim_name'] = trim_name  # クリーンアップしたトリム名で更新
                 valid_trims.append(trim)
         
-        # 有効なトリムがない場合はStandardのみ作成
+        # 有効なトリムがない場合は無し
         if not valid_trims:
-            valid_trims = [{'trim_name': 'Standard'}]
+            valid_trims = [{'trim_name': '無し'}]
         
         # グレードとエンジン情報の収集
         all_grades = self._collect_grades(valid_trims)
