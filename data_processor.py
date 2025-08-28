@@ -9,7 +9,7 @@ import json
 import uuid
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 
 # ======================== Configuration ========================
 GBP_TO_JPY = float(os.getenv("GBP_TO_JPY", "195"))
@@ -338,7 +338,7 @@ class DataProcessor:
                 'overview_ja': overview_ja,
                 'spec_json': spec_json,
                 'media_urls': media_urls,
-                'updated_at': datetime.utcnow().isoformat(),  # ISOフォーマットに変換
+                'updated_at': datetime.utcnow(),  # datetimeオブジェクトのまま
                 'body_type_ja': body_types_ja,
                 'catalog_url': raw_data.get('url'),
                 'grades': all_grades,
@@ -572,9 +572,9 @@ class DataProcessor:
         
         # 無効なパターンを除外
         invalid_patterns = [
-            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
-            r'^s$',         # "s" のみ
-            r'^\W+$',       # 記号のみ
+            r'^\d+\s*s?,  # "0", "2", "0s", "2s"
+            r'^s,         # "s" のみ
+            r'^\W+,       # 記号のみ
         ]
         
         for pattern in invalid_patterns:
@@ -611,8 +611,8 @@ class DataProcessor:
         
         # 無効なパターンを「なし」に置換
         invalid_patterns = [
-            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
-            r'^s$',         # "s" のみ
+            r'^\d+\s*s?,  # "0", "2", "0s", "2s"
+            r'^s,         # "s" のみ
             r'^0\s',        # "0 " で始まる
         ]
         
@@ -624,7 +624,7 @@ class DataProcessor:
         patterns_to_remove = [
             r'\b\d+\s*s\b',      # "2 s", "0 s" など
             r'^\d+\s+',          # 先頭の数字とスペース
-            r'\s+\d+$',          # 末尾のスペースと数字
+            r'\s+\d+,          # 末尾のスペースと数字
         ]
         
         for pattern in patterns_to_remove:
@@ -694,7 +694,7 @@ class DataValidator:
     """データ検証クラス"""
     
     @staticmethod
-    def validate_payload(payload: Dict) -> tuple[bool, List[str]]:
+    def validate_payload(payload: Dict) -> Tuple[bool, List[str]]:
         """データの妥当性を検証"""
         errors = []
         
@@ -773,7 +773,7 @@ class DataValidator:
         return len(errors) == 0, errors
     
     @staticmethod
-    def validate_schema_compatibility(payload: Dict, table_schema: List[Dict]) -> tuple[bool, List[str]]:
+    def validate_schema_compatibility(payload: Dict, table_schema: List[Dict]) -> Tuple[bool, List[str]]:
         """テーブルスキーマとの互換性を検証"""
         errors = []
         schema_columns = {col['column_name']: col for col in table_schema}
