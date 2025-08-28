@@ -318,13 +318,13 @@ class VehicleScraper:
         if h1 := soup.find('h1', class_='header__title'):
             title = h1.get_text(strip=True)
             # "Review & Prices"などを除去
-            title = re.sub(r'\s*(Review|Prices?|&).*, '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\s*(Review|Prices?|&).*$', '', title, flags=re.IGNORECASE)
             return title.strip()
         
         # 通常のh1
         if h1 := soup.find('h1'):
             title = h1.get_text(strip=True)
-            title = re.sub(r'\s*(review).*, '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\s*(review).*$', '', title, flags=re.IGNORECASE)
             return title.strip()
         
         # productデータから
@@ -587,7 +587,7 @@ class VehicleScraper:
         
         # 無効なパターンを除外
         invalid_patterns = [
-            r'^\d+,  # 数字のみ
+            r'^\d+$',  # 数字のみ
             r'^£',     # 価格記号で始まる
             r'review|specification|price|from|to|range',  # 一般的でない単語
         ]
@@ -898,6 +898,10 @@ class CarwowScraper:
         
         all_vehicles = []
         
+        for maker in makers:
+            print(f"Processing maker: {maker}")
+            models = self.get_models_for_maker(maker)
+            
             for model_slug in models:
                 try:
                     print(f"  Scraping: {model_slug}")
