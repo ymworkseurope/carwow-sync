@@ -570,11 +570,11 @@ class DataProcessor:
         if not trim_name or len(trim_name.strip()) < 2:
             return False
         
-        # 無効なパターンを除外
+        # 無効なパターンを除外 - 正しい正規表現構文
         invalid_patterns = [
-            r'^\d+\s*s?,  # "0", "2", "0s", "2s"
-            r'^s,         # "s" のみ
-            r'^\W+,       # 記号のみ
+            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
+            r'^s$',         # "s" のみ
+            r'^\W+$',       # 記号のみ
         ]
         
         for pattern in invalid_patterns:
@@ -609,10 +609,10 @@ class DataProcessor:
         # 前後の空白を除去
         cleaned = trim_name.strip()
         
-        # 無効なパターンを「なし」に置換
+        # 無効なパターンを「なし」に置換 - 正しい正規表現構文
         invalid_patterns = [
-            r'^\d+\s*s?,  # "0", "2", "0s", "2s"
-            r'^s,         # "s" のみ
+            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
+            r'^s$',         # "s" のみ
             r'^0\s',        # "0 " で始まる
         ]
         
@@ -620,11 +620,11 @@ class DataProcessor:
             if re.match(pattern, cleaned, re.IGNORECASE):
                 return 'なし'
         
-        # 不要な部分を除去
+        # 不要な部分を除去 - 正しい正規表現構文
         patterns_to_remove = [
             r'\b\d+\s*s\b',      # "2 s", "0 s" など
             r'^\d+\s+',          # 先頭の数字とスペース
-            r'\s+\d+,          # 末尾のスペースと数字
+            r'\s+\d+$',          # 末尾のスペースと数字
         ]
         
         for pattern in patterns_to_remove:
