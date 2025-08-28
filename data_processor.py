@@ -9,7 +9,7 @@ import json
 import uuid
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 
 # ======================== Configuration ========================
 GBP_TO_JPY = float(os.getenv("GBP_TO_JPY", "195"))
@@ -219,23 +219,23 @@ class DataProcessor:
         body_types_en = raw_data.get('body_types', [])
         body_types_ja = [self.translator.translate_body_type(bt) for bt in body_types_en]
         
-        # 基本価格処理
-        price_min_gbp = self._safe_int(raw_data.get('price_min_gbp'))
-        price_max_gbp = self._safe_int(raw_data.get('price_max_gbp'))
-        price_used_gbp = self._safe_int(raw_data.get('price_used_gbp'))
+        # 基本価格処理 - numericに合わせて小数点対応
+        price_min_gbp = self._safe_numeric(raw_data.get('price_min_gbp'))
+        price_max_gbp = self._safe_numeric(raw_data.get('price_max_gbp'))
+        price_used_gbp = self._safe_numeric(raw_data.get('price_used_gbp'))
         
         price_min_jpy = self._convert_to_jpy(price_min_gbp)
         price_max_jpy = self._convert_to_jpy(price_max_gbp)
         price_used_jpy = self._convert_to_jpy(price_used_gbp)
         
-        # doors/seatsを取得
-        doors = self._safe_int(raw_data.get('doors'))
-        seats = self._safe_int(raw_data.get('seats'))
+        # doors/seatsを取得 - smallintに合わせて型変更
+        doors = self._safe_smallint(raw_data.get('doors'))
+        seats = self._safe_smallint(raw_data.get('seats'))
         
-        # カラー処理
-        colors = raw_data.get('colors', [])
+        # カラー処理 - 配列として適切に処理
+        colors = self._process_array_field(raw_data.get('colors', []))
         
-        # メディアURL処理
+        # メディアURL処理 - 配列として適切に処理
         media_urls = self._process_media_urls(raw_data.get('images', []))
         
         # トリム情報を取得（実際に見つかったもののみ）
@@ -252,6 +252,10 @@ class DataProcessor:
         # 有効なトリムがない場合はStandardのみ作成
         if not valid_trims:
             valid_trims = [{'trim_name': 'Standard'}]
+        
+        # グレードとエンジン情報の収集
+        all_grades = self._collect_grades(valid_trims)
+        all_engines = self._collect_engines(valid_trims)
         
         # デバッグ用ログ
         print(f"  Found {len(valid_trims)} valid trims: {[t.get('trim_name', 'Unknown') for t in valid_trims]}")
@@ -293,11 +297,14 @@ class DataProcessor:
             full_model_ja = ' '.join(full_model_parts)
             
             # トリム固有の価格があれば使用（なければベース価格）
-            trim_price_min = self._safe_int(trim.get('price_rrp')) or price_min_gbp
+            trim_price_min = self._safe_numeric(trim.get('price_rrp')) or price_min_gbp
             trim_price_max = trim_price_min or price_max_gbp  # RRP価格がある場合はそれを上限にも
             
             trim_price_min_jpy = self._convert_to_jpy(trim_price_min)
             trim_price_max_jpy = self._convert_to_jpy(trim_price_max)
+            
+            # power_bhp - integerタイプに合わせて変更
+            power_bhp = self._safe_int(trim.get('power_bhp'))
             
             # スペック情報の整理
             spec_json = self._compile_specifications(raw_data)
@@ -306,7 +313,7 @@ class DataProcessor:
                     'trim_name': trim_name,
                     'engine': engine,
                     'fuel_type': fuel_en,
-                    'power_bhp': trim.get('power_bhp'),
+                    'power_bhp': power_bhp,
                     'transmission': transmission_en,
                     'drive_type': drive_en
                 },
@@ -323,35 +330,37 @@ class DataProcessor:
                 'model_en': model_en,
                 'make_ja': make_ja,
                 'model_ja': model_ja,
-                'trim_name': trim_name,
-                'grade': trim_name,  # grade列として追加
-                'engine': engine,    # engine列として追加
-                'body_type': body_types_en,
-                'body_type_ja': body_types_ja,
+                'body_type': body_types_en,  # 配列として保持
                 'fuel': fuel_en,
-                'fuel_ja': fuel_ja,
-                'transmission': transmission_en,
-                'transmission_ja': transmission_ja,
-                'price_min_gbp': trim_price_min,  # トリム固有価格を使用
+                'price_min_gbp': trim_price_min,
                 'price_max_gbp': trim_price_max,
-                'price_used_gbp': price_used_gbp,
                 'price_min_jpy': trim_price_min_jpy,
                 'price_max_jpy': trim_price_max_jpy,
-                'price_used_jpy': price_used_jpy,
                 'overview_en': raw_data.get('overview', ''),
                 'overview_ja': overview_ja,
+                'spec_json': spec_json,  # JSONBとして保存
+                'media_urls': media_urls,  # 配列として保持
+                'updated_at': datetime.utcnow(),
+                'body_type_ja': body_types_ja,  # 配列として保持
+                'catalog_url': raw_data.get('url'),
+                'grades': all_grades,  # JSONBとして新規追加
+                'engines': all_engines,  # JSONBとして新規追加
                 'doors': doors,
                 'seats': seats,
-                'power_bhp': trim.get('power_bhp'),
+                'dimensions_mm': self._process_dimensions(raw_data.get('dimensions')),
                 'drive_type': drive_en,
-                'drive_type_ja': drive_ja,
-                'dimensions_mm': raw_data.get('dimensions') or spec_json.get('dimensions_structured'),
-                'colors': colors,
-                'media_urls': media_urls,
-                'catalog_url': raw_data.get('url'),
                 'full_model_ja': full_model_ja,
-                'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
-                'spec_json': json.dumps(spec_json, ensure_ascii=False)
+                'colors': colors,  # 配列として保持
+                'drive_type_ja': drive_ja,
+                'price_used_gbp': price_used_gbp,
+                'price_used_jpy': price_used_jpy,
+                'transmission': transmission_en,
+                'transmission_ja': transmission_ja,
+                'fuel_ja': fuel_ja,
+                'power_bhp': power_bhp,
+                'trim_name': trim_name,
+                'engine': engine,
+                'grade': trim_name
             }
             
             payloads.append(payload)
@@ -366,6 +375,121 @@ class DataProcessor:
                                                   doors, seats, colors, media_urls)
         
         return payloads
+    
+    def _collect_grades(self, trims: List[Dict]) -> Dict:
+        """全トリムからグレード情報を収集してJSONB形式で構造化"""
+        grades = {}
+        
+        for trim in trims:
+            trim_name = trim.get('trim_name', 'Standard')
+            grade_info = {
+                'name': trim_name,
+                'engine': trim.get('engine', ''),
+                'power_bhp': self._safe_int(trim.get('power_bhp')),
+                'transmission': trim.get('transmission', ''),
+                'fuel_type': trim.get('fuel_type', ''),
+                'drive_type': trim.get('drive_type', ''),
+                'price_rrp': self._safe_numeric(trim.get('price_rrp'))
+            }
+            
+            # Noneの値を除去
+            grade_info = {k: v for k, v in grade_info.items() if v is not None and v != ''}
+            grades[trim_name] = grade_info
+        
+        return grades
+    
+    def _collect_engines(self, trims: List[Dict]) -> Dict:
+        """全トリムからエンジン情報を収集してJSONB形式で構造化"""
+        engines = {}
+        
+        for trim in trims:
+            engine = trim.get('engine', '')
+            if engine and engine not in engines:
+                engine_info = {
+                    'name': engine,
+                    'power_bhp': self._safe_int(trim.get('power_bhp')),
+                    'fuel_type': trim.get('fuel_type', ''),
+                    'associated_trims': []
+                }
+                engines[engine] = engine_info
+            
+            # トリム名をエンジンに関連付け
+            if engine and engine in engines:
+                trim_name = trim.get('trim_name', 'Standard')
+                if trim_name not in engines[engine]['associated_trims']:
+                    engines[engine]['associated_trims'].append(trim_name)
+        
+        return engines
+    
+    def _process_array_field(self, field_data: Union[List, str, None]) -> List[str]:
+        """配列フィールドの適切な処理"""
+        if not field_data:
+            return []
+        
+        if isinstance(field_data, list):
+            return [str(item) for item in field_data if item]
+        
+        if isinstance(field_data, str):
+            # カンマ区切りの文字列を配列に変換
+            return [item.strip() for item in field_data.split(',') if item.strip()]
+        
+        return []
+    
+    def _process_dimensions(self, dimensions_data: Union[Dict, str, None]) -> Optional[str]:
+        """寸法データの処理"""
+        if not dimensions_data:
+            return None
+        
+        if isinstance(dimensions_data, dict):
+            # 辞書形式の場合は文字列に変換
+            parts = []
+            for key, value in dimensions_data.items():
+                if value:
+                    parts.append(f"{key}: {value}")
+            return "; ".join(parts) if parts else None
+        
+        if isinstance(dimensions_data, str):
+            return dimensions_data
+        
+        return str(dimensions_data)
+    
+    def _safe_numeric(self, value: Any) -> Optional[float]:
+        """安全な数値変換（numeric型対応）"""
+        if value is None:
+            return None
+        
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        if isinstance(value, str):
+            cleaned = value.replace(',', '').replace('£', '').replace('¥', '')
+            try:
+                return float(cleaned)
+            except (ValueError, TypeError):
+                pass
+        
+        return None
+    
+    def _safe_smallint(self, value: Any) -> Optional[int]:
+        """安全なsmallint変換"""
+        if value is None:
+            return None
+        
+        try:
+            num = int(float(str(value).replace(',', '')))
+            # smallintの範囲チェック (-32768 to 32767)
+            if -32768 <= num <= 32767:
+                return num
+        except (ValueError, TypeError):
+            pass
+        
+        return None
+    
+    def _convert_to_jpy(self, gbp: Optional[float]) -> Optional[float]:
+        """GBPからJPYに変換"""
+        if gbp is None:
+            return None
+        return gbp * GBP_TO_JPY
     
     def _is_valid_trim_name_for_processing(self, trim_name: str) -> bool:
         """処理用のトリム名妥当性チェック"""
@@ -388,12 +512,24 @@ class DataProcessor:
     def _create_default_payload(self, raw_data: Dict, make_en: str, make_ja: str, 
                               model_en: str, model_ja: str, overview_ja: str,
                               body_types_en: List, body_types_ja: List,
-                              price_min_gbp: int, price_max_gbp: int, price_used_gbp: int,
-                              price_min_jpy: int, price_max_jpy: int, price_used_jpy: int,
+                              price_min_gbp: float, price_max_gbp: float, price_used_gbp: float,
+                              price_min_jpy: float, price_max_jpy: float, price_used_jpy: float,
                               doors: int, seats: int, colors: List, media_urls: List) -> List[Dict]:
         """デフォルトのStandardトリムペイロードを作成"""
         
         vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))
+        
+        # デフォルト用のグレードとエンジン情報
+        default_grades = {
+            'Standard': {
+                'name': 'Standard',
+                'engine': '',
+                'fuel_type': raw_data.get('fuel_type', ''),
+                'transmission': raw_data.get('transmission', '')
+            }
+        }
+        
+        default_engines = {}
         
         spec_json = self._compile_specifications(raw_data)
         spec_json.update({
@@ -418,35 +554,37 @@ class DataProcessor:
             'model_en': model_en,
             'make_ja': make_ja,
             'model_ja': model_ja,
-            'trim_name': 'Standard',
-            'grade': 'Standard',
-            'engine': '',
             'body_type': body_types_en,
-            'body_type_ja': body_types_ja,
             'fuel': raw_data.get('fuel_type', ''),
-            'fuel_ja': self.translator.translate_fuel(raw_data.get('fuel_type', '')),
-            'transmission': raw_data.get('transmission', ''),
-            'transmission_ja': self.translator.translate_transmission(raw_data.get('transmission', '')),
             'price_min_gbp': price_min_gbp,
             'price_max_gbp': price_max_gbp,
-            'price_used_gbp': price_used_gbp,
             'price_min_jpy': price_min_jpy,
             'price_max_jpy': price_max_jpy,
-            'price_used_jpy': price_used_jpy,
             'overview_en': raw_data.get('overview', ''),
             'overview_ja': overview_ja,
+            'spec_json': spec_json,
+            'media_urls': media_urls,
+            'updated_at': datetime.utcnow(),
+            'body_type_ja': body_types_ja,
+            'catalog_url': raw_data.get('url'),
+            'grades': default_grades,
+            'engines': default_engines,
             'doors': doors,
             'seats': seats,
-            'power_bhp': None,
+            'dimensions_mm': self._process_dimensions(raw_data.get('dimensions')),
             'drive_type': '',
-            'drive_type_ja': '',
-            'dimensions_mm': raw_data.get('dimensions') or spec_json.get('dimensions_structured'),
-            'colors': colors,
-            'media_urls': media_urls,
-            'catalog_url': raw_data.get('url'),
             'full_model_ja': f"{make_ja} {model_en}",
-            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
-            'spec_json': json.dumps(spec_json, ensure_ascii=False)
+            'colors': colors,
+            'drive_type_ja': '',
+            'price_used_gbp': price_used_gbp,
+            'price_used_jpy': price_used_jpy,
+            'transmission': raw_data.get('transmission', ''),
+            'transmission_ja': self.translator.translate_transmission(raw_data.get('transmission', '')),
+            'fuel_ja': self.translator.translate_fuel(raw_data.get('fuel_type', '')),
+            'power_bhp': None,
+            'trim_name': 'Standard',
+            'engine': '',
+            'grade': 'Standard'
         }
         
         return [payload]
@@ -523,12 +661,6 @@ class DataProcessor:
         
         return None
     
-    def _convert_to_jpy(self, gbp: Optional[int]) -> Optional[int]:
-        """GBPからJPYに変換"""
-        if gbp is None:
-            return None
-        return int(gbp * GBP_TO_JPY)
-    
     def _compile_specifications(self, raw_data: Dict) -> Dict:
         """スペック情報をまとめる"""
         specs = raw_data.get('specifications', {}).copy()
@@ -552,6 +684,9 @@ class DataProcessor:
         seen = set()
         
         for url in urls:
+            if not url:
+                continue
+                
             # 正規化
             if '?' in url:
                 url = url.split('?')[0]
@@ -573,27 +708,269 @@ class DataValidator:
         errors = []
         
         # 必須フィールドのチェック
-        required_fields = ['id', 'slug', 'make_en', 'model_en', 'trim_name']
+        required_fields = ['id', 'slug', 'make_en', 'model_en']
         for field in required_fields:
             if not payload.get(field):
                 errors.append(f"Missing required field: {field}")
         
+        # UUIDの形式チェック
+        if 'id' in payload:
+            try:
+                uuid.UUID(payload['id'])
+            except (ValueError, TypeError):
+                errors.append(f"Invalid UUID format: {payload.get('id')}")
+        
         # スラッグの形式チェック
         if 'slug' in payload:
             slug = payload['slug']
-            if '/' not in slug:
+            if not slug or '/' not in slug:
                 errors.append(f"Invalid slug format: {slug}")
         
         # トリム名の妥当性チェック
         trim_name = payload.get('trim_name', '')
-        if not trim_name or len(trim_name.strip()) < 2:
+        if trim_name and len(trim_name.strip()) < 2:
             errors.append(f"Invalid trim_name: {trim_name}")
         
         # 価格の妥当性チェック
         price_min = payload.get('price_min_gbp')
         price_max = payload.get('price_max_gbp')
-        if price_min and price_max:
+        if price_min is not None and price_max is not None:
             if price_min > price_max:
                 errors.append(f"Price min ({price_min}) > Price max ({price_max})")
         
+        # 数値フィールドの範囲チェック
+        numeric_fields = {
+            'doors': (1, 10),
+            'seats': (1, 20),
+            'power_bhp': (0, 2000)
+        }
+        
+        for field, (min_val, max_val) in numeric_fields.items():
+            value = payload.get(field)
+            if value is not None:
+                if not isinstance(value, (int, float)) or value < min_val or value > max_val:
+                    errors.append(f"Invalid {field}: {value} (must be between {min_val} and {max_val})")
+        
+        # 配列フィールドの検証
+        array_fields = ['body_type', 'body_type_ja', 'colors', 'media_urls']
+        for field in array_fields:
+            value = payload.get(field)
+            if value is not None and not isinstance(value, list):
+                errors.append(f"Field {field} must be an array, got {type(value)}")
+        
+        # JSONB フィールドの検証
+        jsonb_fields = ['spec_json', 'grades', 'engines']
+        for field in jsonb_fields:
+            value = payload.get(field)
+            if value is not None:
+                if not isinstance(value, dict):
+                    errors.append(f"Field {field} must be a dict for JSONB, got {type(value)}")
+                else:
+                    # JSON serializable かチェック
+                    try:
+                        json.dumps(value, ensure_ascii=False)
+                    except (TypeError, ValueError) as e:
+                        errors.append(f"Field {field} is not JSON serializable: {e}")
+        
+        # タイムスタンプの検証
+        if 'updated_at' in payload:
+            updated_at = payload['updated_at']
+            if not isinstance(updated_at, datetime):
+                errors.append(f"Field updated_at must be datetime, got {type(updated_at)}")
+        
         return len(errors) == 0, errors
+    
+    @staticmethod
+    def validate_schema_compatibility(payload: Dict, table_schema: List[Dict]) -> tuple[bool, List[str]]:
+        """テーブルスキーマとの互換性を検証"""
+        errors = []
+        schema_columns = {col['column_name']: col for col in table_schema}
+        
+        for field_name, field_value in payload.items():
+            if field_name not in schema_columns:
+                errors.append(f"Field {field_name} not found in table schema")
+                continue
+            
+            column_info = schema_columns[field_name]
+            data_type = column_info['data_type'].lower()
+            is_nullable = column_info['is_nullable'] == 'YES'
+            
+            # NULL値のチェック
+            if field_value is None and not is_nullable:
+                errors.append(f"Field {field_name} cannot be NULL")
+                continue
+            
+            if field_value is None:
+                continue  # NULL値は許可されている
+            
+            # データ型の検証
+            type_checks = {
+                'uuid': lambda v: isinstance(v, str) and DataValidator._is_valid_uuid(v),
+                'text': lambda v: isinstance(v, str),
+                'numeric': lambda v: isinstance(v, (int, float)),
+                'integer': lambda v: isinstance(v, int),
+                'smallint': lambda v: isinstance(v, int) and -32768 <= v <= 32767,
+                'jsonb': lambda v: isinstance(v, dict),
+                'array': lambda v: isinstance(v, list),
+                'timestamp with time zone': lambda v: isinstance(v, datetime)
+            }
+            
+            # 配列型の特別処理
+            if data_type == 'array':
+                if not isinstance(field_value, list):
+                    errors.append(f"Field {field_name} must be array, got {type(field_value)}")
+            elif data_type in type_checks:
+                if not type_checks[data_type](field_value):
+                    errors.append(f"Field {field_name} has invalid type for {data_type}")
+        
+        # 必須フィールドの存在チェック
+        for column_name, column_info in schema_columns.items():
+            if column_info['is_nullable'] == 'NO' and column_name not in payload:
+                errors.append(f"Required field {column_name} is missing")
+        
+        return len(errors) == 0, errors
+    
+    @staticmethod
+    def _is_valid_uuid(uuid_string: str) -> bool:
+        """UUID形式の検証"""
+        try:
+            uuid.UUID(uuid_string)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+# ======================== Helper Functions ========================
+def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True) -> Dict:
+    """
+    バッチデータの処理
+    
+    Args:
+        raw_data_list: 生データのリスト
+        validator_enabled: バリデーション有効フラグ
+    
+    Returns:
+        処理結果の辞書 (success_count, error_count, payloads, errors)
+    """
+    processor = DataProcessor()
+    validator = DataValidator()
+    
+    all_payloads = []
+    all_errors = []
+    success_count = 0
+    error_count = 0
+    
+    for i, raw_data in enumerate(raw_data_list):
+        try:
+            # データ処理
+            payloads = processor.process_vehicle_data(raw_data)
+            
+            if validator_enabled:
+                # 各ペイロードのバリデーション
+                valid_payloads = []
+                for payload in payloads:
+                    is_valid, validation_errors = validator.validate_payload(payload)
+                    if is_valid:
+                        valid_payloads.append(payload)
+                    else:
+                        error_count += 1
+                        all_errors.extend([f"Item {i} - {error}" for error in validation_errors])
+                
+                all_payloads.extend(valid_payloads)
+                success_count += len(valid_payloads)
+            else:
+                all_payloads.extend(payloads)
+                success_count += len(payloads)
+                
+        except Exception as e:
+            error_count += 1
+            all_errors.append(f"Item {i} - Processing error: {str(e)}")
+    
+    return {
+        'success_count': success_count,
+        'error_count': error_count,
+        'payloads': all_payloads,
+        'errors': all_errors
+    }
+
+def validate_against_schema(payloads: List[Dict], table_schema: List[Dict]) -> Dict:
+    """
+    テーブルスキーマに対するバリデーション
+    
+    Args:
+        payloads: ペイロードのリスト
+        table_schema: テーブルスキーマの定義
+    
+    Returns:
+        バリデーション結果
+    """
+    validator = DataValidator()
+    valid_payloads = []
+    schema_errors = []
+    
+    for i, payload in enumerate(payloads):
+        is_valid, errors = validator.validate_schema_compatibility(payload, table_schema)
+        if is_valid:
+            valid_payloads.append(payload)
+        else:
+            schema_errors.extend([f"Payload {i} - {error}" for error in errors])
+    
+    return {
+        'valid_count': len(valid_payloads),
+        'invalid_count': len(payloads) - len(valid_payloads),
+        'valid_payloads': valid_payloads,
+        'schema_errors': schema_errors
+    }
+
+# ======================== Example Usage ========================
+if __name__ == "__main__":
+    # サンプルデータでのテスト
+    sample_raw_data = {
+        'slug': 'bmw/3-series',
+        'make': 'BMW',
+        'model': '3 Series',
+        'body_types': ['Saloon', 'Estate'],
+        'fuel_type': 'Petrol',
+        'transmission': 'Automatic',
+        'price_min_gbp': 35000,
+        'price_max_gbp': 55000,
+        'overview': 'The BMW 3 Series is a compact executive car.',
+        'doors': 4,
+        'seats': 5,
+        'colors': ['Alpine White', 'Jet Black', 'Storm Bay'],
+        'images': ['https://example.com/img1.jpg', 'https://example.com/img2.jpg'],
+        'trims': [
+            {
+                'trim_name': '320i',
+                'engine': '2.0L TwinPower Turbo',
+                'power_bhp': 184,
+                'fuel_type': 'Petrol',
+                'transmission': 'Automatic',
+                'price_rrp': 35000
+            },
+            {
+                'trim_name': '330i',
+                'engine': '2.0L TwinPower Turbo',
+                'power_bhp': 258,
+                'fuel_type': 'Petrol',
+                'transmission': 'Automatic',
+                'price_rrp': 45000
+            }
+        ]
+    }
+    
+    # 処理の実行
+    processor = DataProcessor()
+    payloads = processor.process_vehicle_data(sample_raw_data)
+    
+    print(f"Generated {len(payloads)} payloads:")
+    for i, payload in enumerate(payloads):
+        print(f"  Payload {i+1}: {payload['make_en']} {payload['model_en']} {payload['trim_name']}")
+    
+    # バリデーションのテスト
+    validator = DataValidator()
+    for i, payload in enumerate(payloads):
+        is_valid, errors = validator.validate_payload(payload)
+        print(f"  Payload {i+1} validation: {'PASS' if is_valid else 'FAIL'}")
+        if errors:
+            for error in errors:
+                print(f"    - {error}")
