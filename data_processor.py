@@ -204,6 +204,7 @@ class DataProcessor:
     def process_vehicle_data(self, raw_data: Dict) -> List[Dict]:
         """
         生データをデータベース形式に変換（トリムごとに複数行生成）
+        修正版: 実際に見つかったトリムのみ処理
         """
         # 基本情報の処理
         make_en = self._clean_make_name(raw_data.get('make', ''))
@@ -237,20 +238,40 @@ class DataProcessor:
         # メディアURL処理
         media_urls = self._process_media_urls(raw_data.get('images', []))
         
-        # トリム情報を取得
+        # トリム情報を取得（実際に見つかったもののみ）
         trims = raw_data.get('trims', [])
-        if not trims:
-            trims = [{'trim_name': 'Standard'}]
+        
+        # トリムデータの検証とフィルタリング
+        valid_trims = []
+        for trim in trims:
+            trim_name = self._clean_trim_name(trim.get('trim_name', ''))
+            if self._is_valid_trim_name_for_processing(trim_name):
+                trim['trim_name'] = trim_name  # クリーンアップしたトリム名で更新
+                valid_trims.append(trim)
+        
+        # 有効なトリムがない場合はStandardのみ作成
+        if not valid_trims:
+            valid_trims = [{'trim_name': 'Standard'}]
+        
+        # デバッグ用ログ
+        print(f"  Found {len(valid_trims)} valid trims: {[t.get('trim_name', 'Unknown') for t in valid_trims]}")
         
         # 各トリムごとにペイロードを作成
         payloads = []
-        for trim_index, trim in enumerate(trims):
+        for trim_index, trim in enumerate(valid_trims):
+            # トリム名の検証とクリーニング
+            trim_name = self._clean_trim_name(trim.get('trim_name', 'Standard'))
+            
+            # 無効なトリム名をスキップ
+            if not self._is_valid_trim_name_for_processing(trim_name):
+                print(f"    Skipping invalid trim: {trim_name}")
+                continue
+            
             # UUID生成（トリムごとにユニーク）
-            trim_id = f"{raw_data['slug']}_{trim.get('trim_name', 'Standard')}_{trim_index}"
+            trim_id = f"{raw_data['slug']}_{trim_name}_{trim_index}"
             vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, trim_id))
             
             # トリム固有情報
-            trim_name = self._clean_trim_name(trim.get('trim_name', 'Standard'))
             engine = trim.get('engine', '')
             
             # トランスミッション処理
@@ -270,6 +291,13 @@ class DataProcessor:
             if trim_name and trim_name != 'Standard':
                 full_model_parts.append(trim_name)
             full_model_ja = ' '.join(full_model_parts)
+            
+            # トリム固有の価格があれば使用（なければベース価格）
+            trim_price_min = self._safe_int(trim.get('price_rrp')) or price_min_gbp
+            trim_price_max = trim_price_min or price_max_gbp  # RRP価格がある場合はそれを上限にも
+            
+            trim_price_min_jpy = self._convert_to_jpy(trim_price_min)
+            trim_price_max_jpy = self._convert_to_jpy(trim_price_max)
             
             # スペック情報の整理
             spec_json = self._compile_specifications(raw_data)
@@ -304,11 +332,11 @@ class DataProcessor:
                 'fuel_ja': fuel_ja,
                 'transmission': transmission_en,
                 'transmission_ja': transmission_ja,
-                'price_min_gbp': price_min_gbp,
-                'price_max_gbp': price_max_gbp,
+                'price_min_gbp': trim_price_min,  # トリム固有価格を使用
+                'price_max_gbp': trim_price_max,
                 'price_used_gbp': price_used_gbp,
-                'price_min_jpy': price_min_jpy,
-                'price_max_jpy': price_max_jpy,
+                'price_min_jpy': trim_price_min_jpy,
+                'price_max_jpy': trim_price_max_jpy,
                 'price_used_jpy': price_used_jpy,
                 'overview_en': raw_data.get('overview', ''),
                 'overview_ja': overview_ja,
@@ -328,7 +356,100 @@ class DataProcessor:
             
             payloads.append(payload)
         
+        # 最終チェック: 有効なペイロードがない場合はStandardを作成
+        if not payloads:
+            print(f"  No valid trims found, creating default Standard trim")
+            payloads = self._create_default_payload(raw_data, make_en, make_ja, model_en, model_ja,
+                                                  overview_ja, body_types_en, body_types_ja,
+                                                  price_min_gbp, price_max_gbp, price_used_gbp,
+                                                  price_min_jpy, price_max_jpy, price_used_jpy,
+                                                  doors, seats, colors, media_urls)
+        
         return payloads
+    
+    def _is_valid_trim_name_for_processing(self, trim_name: str) -> bool:
+        """処理用のトリム名妥当性チェック"""
+        if not trim_name or len(trim_name.strip()) < 2:
+            return False
+        
+        # 無効なパターンを除外
+        invalid_patterns = [
+            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
+            r'^s$',         # "s" のみ
+            r'^\W+$',       # 記号のみ
+        ]
+        
+        for pattern in invalid_patterns:
+            if re.match(pattern, trim_name.strip(), re.IGNORECASE):
+                return False
+        
+        return True
+    
+    def _create_default_payload(self, raw_data: Dict, make_en: str, make_ja: str, 
+                              model_en: str, model_ja: str, overview_ja: str,
+                              body_types_en: List, body_types_ja: List,
+                              price_min_gbp: int, price_max_gbp: int, price_used_gbp: int,
+                              price_min_jpy: int, price_max_jpy: int, price_used_jpy: int,
+                              doors: int, seats: int, colors: List, media_urls: List) -> List[Dict]:
+        """デフォルトのStandardトリムペイロードを作成"""
+        
+        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))
+        
+        spec_json = self._compile_specifications(raw_data)
+        spec_json.update({
+            'trim_info': {
+                'trim_name': 'Standard',
+                'engine': '',
+                'fuel_type': raw_data.get('fuel_type', ''),
+                'power_bhp': None,
+                'transmission': raw_data.get('transmission', ''),
+                'drive_type': ''
+            },
+            'doors': doors,
+            'seats': seats,
+            'grade': 'Standard',
+            'engine': ''
+        })
+        
+        payload = {
+            'id': vehicle_id,
+            'slug': raw_data['slug'],
+            'make_en': make_en,
+            'model_en': model_en,
+            'make_ja': make_ja,
+            'model_ja': model_ja,
+            'trim_name': 'Standard',
+            'grade': 'Standard',
+            'engine': '',
+            'body_type': body_types_en,
+            'body_type_ja': body_types_ja,
+            'fuel': raw_data.get('fuel_type', ''),
+            'fuel_ja': self.translator.translate_fuel(raw_data.get('fuel_type', '')),
+            'transmission': raw_data.get('transmission', ''),
+            'transmission_ja': self.translator.translate_transmission(raw_data.get('transmission', '')),
+            'price_min_gbp': price_min_gbp,
+            'price_max_gbp': price_max_gbp,
+            'price_used_gbp': price_used_gbp,
+            'price_min_jpy': price_min_jpy,
+            'price_max_jpy': price_max_jpy,
+            'price_used_jpy': price_used_jpy,
+            'overview_en': raw_data.get('overview', ''),
+            'overview_ja': overview_ja,
+            'doors': doors,
+            'seats': seats,
+            'power_bhp': None,
+            'drive_type': '',
+            'drive_type_ja': '',
+            'dimensions_mm': raw_data.get('dimensions') or spec_json.get('dimensions_structured'),
+            'colors': colors,
+            'media_urls': media_urls,
+            'catalog_url': raw_data.get('url'),
+            'full_model_ja': f"{make_ja} {model_en}",
+            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+            'spec_json': json.dumps(spec_json, ensure_ascii=False)
+        }
+        
+        return [payload]
     
     def _clean_make_name(self, make: str) -> str:
         """メーカー名のクリーニング"""
@@ -349,26 +470,38 @@ class DataProcessor:
         return make.title()
     
     def _clean_trim_name(self, trim_name: str) -> str:
-        """トリム名のクリーニング"""
+        """トリム名のクリーニング（改良版）"""
         if not trim_name:
             return "Standard"
         
-        # 不要なパターンを除去
-        patterns_to_remove = [
-            r'\b\d+\s*s\b',      # "0 s", "2 s" など
-            r'^\d+\s+',           # 先頭の数字
-            r'\s+\d+$',           # 末尾の数字
-            r'^0\s',              # 先頭の"0 "
+        # 前後の空白を除去
+        cleaned = trim_name.strip()
+        
+        # 無効なパターンをStandardに置換
+        invalid_patterns = [
+            r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
+            r'^s$',         # "s" のみ
+            r'^0\s',        # "0 " で始まる
         ]
         
-        cleaned = trim_name
+        for pattern in invalid_patterns:
+            if re.match(pattern, cleaned, re.IGNORECASE):
+                return 'Standard'
+        
+        # 不要な部分を除去
+        patterns_to_remove = [
+            r'\b\d+\s*s\b',      # "2 s", "0 s" など
+            r'^\d+\s+',          # 先頭の数字とスペース
+            r'\s+\d+$',          # 末尾のスペースと数字
+        ]
+        
         for pattern in patterns_to_remove:
             cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
         
         cleaned = cleaned.strip()
         
-        # 空になった場合や無効な値の場合はStandardを返す
-        if not cleaned or cleaned in ['s', 'S', '0']:
+        # 最終チェック: 空文字や短すぎる場合
+        if not cleaned or len(cleaned) < 2:
             return 'Standard'
         
         return cleaned
@@ -440,7 +573,7 @@ class DataValidator:
         errors = []
         
         # 必須フィールドのチェック
-        required_fields = ['id', 'slug', 'make_en', 'model_en']
+        required_fields = ['id', 'slug', 'make_en', 'model_en', 'trim_name']
         for field in required_fields:
             if not payload.get(field):
                 errors.append(f"Missing required field: {field}")
@@ -450,6 +583,11 @@ class DataValidator:
             slug = payload['slug']
             if '/' not in slug:
                 errors.append(f"Invalid slug format: {slug}")
+        
+        # トリム名の妥当性チェック
+        trim_name = payload.get('trim_name', '')
+        if not trim_name or len(trim_name.strip()) < 2:
+            errors.append(f"Invalid trim_name: {trim_name}")
         
         # 価格の妥当性チェック
         price_min = payload.get('price_min_gbp')
