@@ -601,8 +601,8 @@ class VehicleScraper:
         
         return colors
     
-    def _scrape_specifications(self, slug: str) -> Dict:
-        """詳細スペックを取得（改善版 - 寸法情報を強化）"""
+def _scrape_specifications(self, slug: str) -> Dict:
+        """詳細スペックを取得（dimensions改善版）"""
         spec_data = {}
         
         try:
@@ -616,12 +616,13 @@ class VehicleScraper:
             soup = BeautifulSoup(response.text, 'lxml')
             
             # テーブルから取得
-            for row in soup.select('table tr'):
-                cells = row.select('th, td')
-                if len(cells) >= 2:
-                    key = cells[0].get_text(strip=True).lower()
-                    value = cells[1].get_text(strip=True)
-                    spec_data[key] = value
+            for table in soup.select('table'):
+                for row in table.select('tr'):
+                    cells = row.select('th, td')
+                    if len(cells) >= 2:
+                        key = cells[0].get_text(strip=True).lower()
+                        value = cells[1].get_text(strip=True)
+                        spec_data[key] = value
             
             # dt/ddペアから取得
             for dt in soup.select('dt'):
@@ -630,53 +631,51 @@ class VehicleScraper:
                     value = dd.get_text(strip=True)
                     spec_data[key] = value
             
-            # External dimensions セクションを特別に処理
-            external_dims = {}
-            internal_dims = {}
+            # セクションごとの処理（Dimensions and capacitiesなど）
+            sections = soup.find_all(['h2', 'h3', 'h4'])
+            for section in sections:
+                section_text = section.get_text(strip=True).lower()
+                if 'dimension' in section_text or 'capacity' in section_text or 'exterior' in section_text:
+                    # このセクションの次の要素から寸法情報を取得
+                    next_elem = section.find_next_sibling()
+                    while next_elem and next_elem.name not in ['h2', 'h3', 'h4']:
+                        if next_elem.name == 'table':
+                            for row in next_elem.select('tr'):
+                                cells = row.select('th, td')
+                                if len(cells) >= 2:
+                                    key = cells[0].get_text(strip=True).lower()
+                                    value = cells[1].get_text(strip=True)
+                                    spec_data[key] = value
+                        elif next_elem.name == 'dl':
+                            for dt in next_elem.select('dt'):
+                                if dd := dt.find_next_sibling('dd'):
+                                    key = dt.get_text(strip=True).lower()
+                                    value = dd.get_text(strip=True)
+                                    spec_data[key] = value
+                        next_elem = next_elem.find_next_sibling()
             
-            # ページテキストから寸法を抽出
+            # テキスト全体から寸法をパターンマッチで取得（フォールバック）
             page_text = soup.get_text()
             
-            # 寸法パターンを検索
-            dimension_patterns = {
-                'length': [r'Length[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*length'],
-                'width': [r'Width[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*width'],
-                'height': [r'Height[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*height'],
-                'wheelbase': [r'Wheelbase[:\s]*(\d{1,3}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{2,4})\s*mm.*wheelbase'],
-                'turning_circle': [r'Turning circle[:\s]*(\d{1,3}(?:\.\d+)?)\s*(?:mm|m)'],
-                'boot_seats_up': [r'Boot.*seats up.*?(\d{2,4})\s*L', r'(\d{2,4})\s*L.*boot'],
-                'boot_seats_down': [r'Boot.*seats down.*?(\d{3,4})\s*L', r'(\d{3,4})\s*L.*seats down']
-            }
+            # Length/Width/Height パターン
+            dimensions_patterns = [
+                (r'Length[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'length'),
+                (r'Width[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'width'),
+                (r'Height[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'height'),
+                (r'Wheelbase[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'wheelbase'),
+                (r'Overall length[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'overall length'),
+                (r'Overall width[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'overall width'),
+                (r'Overall height[:\s]+(\d{1,2}[,.]?\d{3,4})\s*mm', 'overall height'),
+            ]
             
-            for dim_name, patterns in dimension_patterns.items():
-                for pattern in patterns:
-                    match = re.search(pattern, page_text, re.IGNORECASE)
-                    if match:
-                        try:
-                            value = float(match.group(1))
-                            # 単位変換（mからmm）
-                            if 'm' in pattern and value < 100:
-                                value = int(value * 1000)
-                            else:
-                                value = int(value)
-                            spec_data[dim_name] = str(value)
-                            break
-                        except:
-                            continue
-            
-            # HTMLの特定セクションから寸法を抽出
-            for section in soup.find_all(['section', 'div'], class_=re.compile('dimension|spec')):
-                for item in section.find_all(['dt', 'th', 'td']):
-                    text = item.get_text().lower()
-                    if any(dim in text for dim in ['length', 'width', 'height', 'wheelbase', 'boot', 'turning']):
-                        # 次の要素から値を取得
-                        next_elem = item.find_next(['dd', 'td'])
-                        if next_elem:
-                            value = next_elem.get_text().strip()
-                            spec_data[text] = value
+            for pattern, key in dimensions_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).replace(',', '').replace('.', '')
+                    spec_data[key] = f"{value} mm"
             
             # 寸法情報を構造化
-            dimensions = self._extract_dimensions_from_spec(spec_data, soup.text)
+            dimensions = self._extract_dimensions_from_spec(spec_data, soup.get_text())
             if dimensions:
                 spec_data['dimensions_structured'] = dimensions
             
@@ -687,64 +686,80 @@ class VehicleScraper:
     
     def _extract_dimensions_from_spec(self, spec_data: Dict, page_text: str) -> Optional[str]:
         """寸法情報を抽出（改善版）"""
-        dimensions = {'length': None, 'width': None, 'height': None, 'wheelbase': None}
+        dimensions = {'length': None, 'width': None, 'height': None}
         
-        # 標準的な寸法キーをチェック
-        dimension_mappings = {
-            'length': ['length', 'overall length', 'length (mm)', 'overall length (mm)', 'length mm'],
-            'width': ['width', 'overall width', 'width (mm)', 'overall width (mm)', 'width mm'],
-            'height': ['height', 'overall height', 'height (mm)', 'overall height (mm)', 'height mm'],
-            'wheelbase': ['wheelbase', 'wheelbase (mm)', 'wheelbase mm']
-        }
+        # 様々なキー名で寸法を探す
+        LENGTH_KEYS = [
+            'length', 'overall length', 'length (mm)', 'overall length (mm)',
+            'length mm', 'exterior length', 'body length', 'total length'
+        ]
+        WIDTH_KEYS = [
+            'width', 'overall width', 'width (mm)', 'overall width (mm)',
+            'width mm', 'exterior width', 'body width', 'total width',
+            'width (without mirrors)', 'width without mirrors'
+        ]
+        HEIGHT_KEYS = [
+            'height', 'overall height', 'height (mm)', 'overall height (mm)',
+            'height mm', 'exterior height', 'body height', 'total height'
+        ]
         
-        for dim_type, keys in dimension_mappings.items():
-            for key in keys:
-                if key in spec_data:
-                    value = self._extract_dimension_value(spec_data[key])
-                    if value:
-                        dimensions[dim_type] = value
-                        break
-        
-        # ページテキストから直接パターンマッチング
-        if not any(dimensions.values()):
-            patterns = [
-                r'(\d{4})\s*×\s*(\d{4})\s*×\s*(\d{4})\s*mm',  # 4973 × 1931 × 1498 mm
-                r'(\d{4})\s*x\s*(\d{4})\s*x\s*(\d{4})\s*mm',   # 4973 x 1931 x 1498 mm
-                r'L(\d{4})\s*×\s*W(\d{4})\s*×\s*H(\d{4})',     # L4973 × W1931 × H1498
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, page_text)
-                if match:
-                    dimensions['length'] = int(match.group(1))
-                    dimensions['width'] = int(match.group(2))
-                    dimensions['height'] = int(match.group(3))
-                    break
-        
-        # フォーマット
-        result_parts = []
-        
-        if dimensions['length'] and dimensions['width'] and dimensions['height']:
-            result_parts.append(f"L{dimensions['length']} × W{dimensions['width']} × H{dimensions['height']} mm")
-        elif dimensions['length'] and dimensions['width']:
-            result_parts.append(f"L{dimensions['length']} × W{dimensions['width']} mm")
-        elif dimensions['length']:
-            result_parts.append(f"Length: {dimensions['length']} mm")
-        
-        if dimensions['wheelbase']:
-            result_parts.append(f"Wheelbase: {dimensions['wheelbase']} mm")
-        
-        # その他の寸法情報
-        other_dims = []
         for key, value in spec_data.items():
-            if any(word in key for word in ['boot', 'turning', 'ground clearance', 'cargo']):
-                if isinstance(value, str) and value.strip():
-                    other_dims.append(f"{key.title()}: {value}")
+            key_lower = key.lower().strip()
+            
+            # 長さの取得
+            if not dimensions['length']:
+                for lk in LENGTH_KEYS:
+                    if lk in key_lower or key_lower == lk:
+                        if match := re.search(r'(\d{3,4})', str(value).replace(',', '')):
+                            num = int(match.group(1))
+                            if 2000 <= num <= 6000:  # 妥当な範囲チェック
+                                dimensions['length'] = str(num)
+                                break
+            
+            # 幅の取得
+            if not dimensions['width']:
+                for wk in WIDTH_KEYS:
+                    if wk in key_lower or key_lower == wk:
+                        if match := re.search(r'(\d{3,4})', str(value).replace(',', '')):
+                            num = int(match.group(1))
+                            if 1500 <= num <= 2500:  # 妥当な範囲チェック
+                                dimensions['width'] = str(num)
+                                break
+            
+            # 高さの取得
+            if not dimensions['height']:
+                for hk in HEIGHT_KEYS:
+                    if hk in key_lower or key_lower == hk:
+                        if match := re.search(r'(\d{3,4})', str(value).replace(',', '')):
+                            num = int(match.group(1))
+                            if 1000 <= num <= 2500:  # 妥当な範囲チェック
+                                dimensions['height'] = str(num)
+                                break
         
-        if other_dims:
-            result_parts.extend(other_dims[:3])  # 最大3つまで
+        # ページテキストから直接探す（フォールバック）
+        if not all(dimensions.values()):
+            # "Dimensions: 4000 x 1800 x 1500 mm" のようなパターン
+            dim_pattern = r'(\d{3,4})\s*[xX×]\s*(\d{3,4})\s*[xX×]\s*(\d{3,4})'
+            if match := re.search(dim_pattern, page_text):
+                l, w, h = match.groups()
+                l, w, h = int(l), int(w), int(h)
+                
+                # 通常は長さ > 幅 > 高さの順
+                if not dimensions['length'] and 2000 <= l <= 6000:
+                    dimensions['length'] = str(l)
+                if not dimensions['width'] and 1500 <= w <= 2500:
+                    dimensions['width'] = str(w)
+                if not dimensions['height'] and 1000 <= h <= 2500:
+                    dimensions['height'] = str(h)
         
-        return "; ".join(result_parts) if result_parts else None
+        if all(dimensions.values()):
+            return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
+        elif dimensions['length'] and dimensions['width']:
+            return f"{dimensions['length']} x {dimensions['width']} mm"
+        elif dimensions['length']:
+            return f"Length: {dimensions['length']} mm"
+        
+        return None
     
     def _determine_body_types(self, slug: str) -> List[str]:
         """ボディタイプを推定"""
