@@ -72,9 +72,9 @@ class SupabaseManager:
                 'Prefer': 'resolution=merge-duplicates'
             }
             
-            # テーブル名を正しく設定
+            # テーブル名を正しく設定 - 'cars'に変更（既存テーブル名に合わせる）
             response = requests.post(
-                f"{self.url}/rest/v1/system_cars",  # vehiclesではなくsystem_cars
+                f"{self.url}/rest/v1/cars",  # system_carsではなくcarsに変更
                 headers=headers,
                 json=payload,
                 timeout=30
