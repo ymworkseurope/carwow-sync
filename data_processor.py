@@ -4,11 +4,11 @@ data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
 """
 import json
-import os  # Added import for os
+import os
 import uuid
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any  # Added Any import
 
 # ======================== Configuration ========================
 GBP_TO_JPY = 199  # 2025年8月28日時点のレート
