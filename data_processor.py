@@ -238,6 +238,9 @@ class DataProcessor:
         # メディアURL処理 - 配列として適切に処理
         media_urls = self._process_media_urls(raw_data.get('images', []))
         
+        # 寸法情報の処理（共通）
+        dimensions_processed = self._extract_and_format_dimensions(raw_data)
+        
         # トリム情報を取得（実際に見つかったもののみ）
         trims = raw_data.get('trims', [])
         
