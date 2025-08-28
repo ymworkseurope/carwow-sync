@@ -7,7 +7,7 @@ import re
 import json
 import time
 import random
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Any
 from urllib.parse import urljoin, urlparse
 
 import requests
