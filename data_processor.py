@@ -1,4 +1,4 @@
-vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
@@ -694,6 +694,8 @@ class DataProcessor:
         
         # デフォルト用の寸法処理
         dimensions_processed = self._extract_and_format_dimensions(raw_data)
+        
+        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))
         
         # デフォルト用のグレードとエンジン情報
         default_grades = {
