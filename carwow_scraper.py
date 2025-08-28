@@ -601,7 +601,7 @@ class VehicleScraper:
         
         return colors
     
-def _scrape_specifications(self, slug: str) -> Dict:
+    def _scrape_specifications(self, slug: str) -> Dict:
         """詳細スペックを取得（dimensions改善版）"""
         spec_data = {}
         
