@@ -750,61 +750,62 @@ class CarwowScraper:
     def get_models_for_maker(self, maker: str) -> List[str]:
         """指定メーカーの全モデルを取得"""
         return self.model_discovery.get_models_for_maker(maker)
-        def scrape_vehicle(self, slug: str) -> Dict:
-       """車両データを取得"""
-       return self.vehicle_scraper.scrape_vehicle(slug)
-   
-   def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
-       """全車両データを取得"""
-       if makers is None:
-           makers = self.get_all_makers()
-       
-       all_vehicles = []
-       
-       for maker in makers:
-           print(f"Processing maker: {maker}")
-           models = self.get_models_for_maker(maker)
-           
-           for model_slug in models:
-               try:
-                   print(f"  Scraping: {model_slug}")
-                   vehicle_data = self.scrape_vehicle(model_slug)
-                   all_vehicles.append(vehicle_data)
-                   
-                   time.sleep(random.uniform(0.5, 1.5))
-                   
-               except Exception as e:
-                   print(f"  Error scraping {model_slug}: {e}")
-                   continue
-       
-       return all_vehicles
+    
+    def scrape_vehicle(self, slug: str) -> Dict:
+        """車両データを取得"""
+        return self.vehicle_scraper.scrape_vehicle(slug)
+    
+    def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
+        """全車両データを取得"""
+        if makers is None:
+            makers = self.get_all_makers()
+        
+        all_vehicles = []
+        
+        for maker in makers:
+            print(f"Processing maker: {maker}")
+            models = self.get_models_for_maker(maker)
+            
+            for model_slug in models:
+                try:
+                    print(f"  Scraping: {model_slug}")
+                    vehicle_data = self.scrape_vehicle(model_slug)
+                    all_vehicles.append(vehicle_data)
+                    
+                    time.sleep(random.uniform(0.5, 1.5))
+                    
+                except Exception as e:
+                    print(f"  Error scraping {model_slug}: {e}")
+                    continue
+        
+        return all_vehicles
 
 # ======================== Utility Functions ========================
 def test_scraper():
-   """スクレイパーのテスト"""
-   scraper = CarwowScraper()
-   
-   # メーカー取得テスト
-   print("Testing maker discovery...")
-   makers = scraper.get_all_makers()
-   print(f"Found {len(makers)} makers: {makers[:5]}...")
-   
-   # モデル取得テスト
-   print("\nTesting model discovery for 'audi'...")
-   models = scraper.get_models_for_maker('audi')
-   print(f"Found {len(models)} models: {models[:5]}...")
-   
-   # 車両データ取得テスト
-   if models:
-       print(f"\nTesting vehicle scrape for '{models[0]}'...")
-       vehicle = scraper.scrape_vehicle(models[0])
-       print(f"Title: {vehicle.get('title')}")
-       print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
-       print(f"Body types: {vehicle.get('body_types')}")
-       print(f"Trims: {len(vehicle.get('trims', []))} found")
-       for trim in vehicle.get('trims', []):
-           print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
+    """スクレイパーのテスト"""
+    scraper = CarwowScraper()
+    
+    # メーカー取得テスト
+    print("Testing maker discovery...")
+    makers = scraper.get_all_makers()
+    print(f"Found {len(makers)} makers: {makers[:5]}...")
+    
+    # モデル取得テスト
+    print("\nTesting model discovery for 'audi'...")
+    models = scraper.get_models_for_maker('audi')
+    print(f"Found {len(models)} models: {models[:5]}...")
+    
+    # 車両データ取得テスト
+    if models:
+        print(f"\nTesting vehicle scrape for '{models[0]}'...")
+        vehicle = scraper.scrape_vehicle(models[0])
+        print(f"Title: {vehicle.get('title')}")
+        print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
+        print(f"Body types: {vehicle.get('body_types')}")
+        print(f"Trims: {len(vehicle.get('trims', []))} found")
+        for trim in vehicle.get('trims', []):
+            print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
 
 
 if __name__ == "__main__":
-   test_scraper()
+    test_scraper()
