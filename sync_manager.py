@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 sync_manager.py
-実行管理とデータベース・スプレッドシート同期モジュール - 修正版
+実行管理とデータベース・スプレッドシート同期モジュール
 """
 import os
 import sys
@@ -32,11 +32,11 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GS_CREDS_JSON = os.getenv("GS_CREDS_JSON")
 GS_SHEET_ID = os.getenv("GS_SHEET_ID")
 
-# Google Sheets設定（trim_name削除）
+# Google Sheets設定
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
-    "grade", "engine", "body_type", "body_type_ja", "fuel", "fuel_ja",
+    "trim_name", "grade", "engine", "body_type", "body_type_ja", "fuel", "fuel_ja",
     "transmission", "transmission_ja",
     "price_min_gbp", "price_max_gbp", "price_used_gbp",
     "price_min_jpy", "price_max_jpy", "price_used_jpy",
@@ -71,18 +71,6 @@ class SupabaseManager:
                 'Content-Type': 'application/json',
                 'Prefer': 'resolution=merge-duplicates'
             }
-            
-            # updated_atがdatetimeオブジェクトの場合は文字列に変換
-            if 'updated_at' in payload:
-                if isinstance(payload['updated_at'], datetime):
-                    payload['updated_at'] = payload['updated_at'].isoformat() + 'Z'
-            
-            # JSONシリアライズ可能かテスト
-            try:
-                json.dumps(payload, ensure_ascii=False)
-            except TypeError as e:
-                print(f"JSON serialization error: {e}")
-                return False
             
             # 正しいテーブル名を使用
             response = requests.post(
@@ -205,32 +193,32 @@ class GoogleSheetsManager:
             traceback.print_exc()
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（trim_name削除、grade使用）"""
+        """データをUPSERT"""
         if not self.enabled:
             return False
         
         try:
             slug = payload.get('slug')
-            grade = payload.get('grade', '無し')
+            trim_name = payload.get('trim_name', 'Standard')
             
             if not slug:
                 return False
             
-            # ユニークキーとしてslug + gradeを使用
-            unique_key = f"{slug}_{grade}"
+            # ユニークキーとしてslug + trim_nameを使用
+            unique_key = f"{slug}_{trim_name}"
             
             # 既存データ検索
             try:
-                if 'slug' in self.headers and 'grade' in self.headers:
+                if 'slug' in self.headers and 'trim_name' in self.headers:
                     slug_col = self.headers.index('slug') + 1
-                    grade_col = self.headers.index('grade') + 1
+                    trim_col = self.headers.index('trim_name') + 1
                     
                     all_values = self.worksheet.get_all_values()
                     
                     row_num = None
                     for i, row in enumerate(all_values[1:], start=2):
-                        if len(row) > max(slug_col-1, grade_col-1):
-                            if row[slug_col-1] == slug and row[grade_col-1] == grade:
+                        if len(row) > max(slug_col-1, trim_col-1):
+                            if row[slug_col-1] == slug and row[trim_col-1] == trim_name:
                                 row_num = i
                                 break
                     
@@ -371,7 +359,7 @@ class SyncManager:
             # スクレイピング
             raw_data = self.scraper.scrape_vehicle(slug)
             
-            # データ処理（1つまたは複数のペイロードが返される）
+            # データ処理（複数のペイロードが返される）
             payloads = self.processor.process_vehicle_data(raw_data)
             
             if not isinstance(payloads, list):
@@ -382,7 +370,7 @@ class SyncManager:
                 # 検証
                 is_valid, errors = self.validator.validate_payload(payload)
                 if not is_valid:
-                    print(f"INVALID ({payload.get('grade', '')}): {', '.join(errors)}")
+                    print(f"INVALID ({payload.get('trim_name', '')}): {', '.join(errors)}")
                     self.stats['skipped'] += 1
                     continue
                 
@@ -394,8 +382,7 @@ class SyncManager:
                     success = True
             
             if success:
-                grade_info = payloads[0].get('grade', '無し') if payloads else '無し'
-                print(f"OK (Grade: {grade_info})")
+                print(f"OK ({len(payloads)} trims)")
                 self.stats['success'] += 1
             else:
                 print("FAILED")
