@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))#!/usr/bin/env python3
 """
 data_processor.py
 データ変換、翻訳、価格換算などの処理モジュール
@@ -347,7 +347,7 @@ class DataProcessor:
                 'engines': all_engines,  # JSONBとして新規追加
                 'doors': doors,
                 'seats': seats,
-                'dimensions_mm': self._process_dimensions(raw_data.get('dimensions')),
+                'dimensions_mm': dimensions_processed,
                 'drive_type': drive_en,
                 'full_model_ja': full_model_ja,
                 'colors': colors,  # 配列として保持
@@ -419,7 +419,143 @@ class DataProcessor:
                 if trim_name not in engines[engine]['associated_trims']:
                     engines[engine]['associated_trims'].append(trim_name)
         
-        return engines
+    def _extract_and_format_dimensions(self, raw_data: Dict) -> Optional[str]:
+        """寸法データの抽出とフォーマット"""
+        # 複数のソースから寸法情報を取得
+        dimensions_sources = [
+            raw_data.get('dimensions'),
+            raw_data.get('external_dimensions'),
+            raw_data.get('specifications', {}).get('dimensions'),
+            raw_data.get('specifications', {}).get('external_dimensions'),
+            raw_data.get('specs', {}).get('dimensions')
+        ]
+        
+        # 各ソースから寸法情報を抽出
+        length = None
+        width = None
+        height = None
+        wheelbase = None
+        other_dimensions = []
+        
+        for source in dimensions_sources:
+            if not source:
+                continue
+                
+            if isinstance(source, dict):
+                # 長さの取得（複数のキー名をチェック）
+                for key in ['length', 'length_mm', 'overall_length', 'Length']:
+                    if not length and key in source:
+                        length = self._extract_dimension_value(source[key])
+                        break
+                
+                # 幅の取得
+                for key in ['width', 'width_mm', 'overall_width', 'Width']:
+                    if not width and key in source:
+                        width = self._extract_dimension_value(source[key])
+                        break
+                
+                # 高さの取得
+                for key in ['height', 'height_mm', 'overall_height', 'Height']:
+                    if not height and key in source:
+                        height = self._extract_dimension_value(source[key])
+                        break
+                
+                # ホイールベースの取得
+                for key in ['wheelbase', 'wheelbase_mm', 'Wheelbase']:
+                    if not wheelbase and key in source:
+                        wheelbase = self._extract_dimension_value(source[key])
+                        break
+                
+                # その他の寸法情報
+                for key, value in source.items():
+                    if key.lower() not in ['length', 'width', 'height', 'wheelbase', 'length_mm', 'width_mm', 'height_mm', 'wheelbase_mm']:
+                        dim_value = self._extract_dimension_value(value)
+                        if dim_value:
+                            other_dimensions.append(f"{key}: {dim_value} mm")
+            
+            elif isinstance(source, str):
+                # 文字列から寸法を抽出（例: "3673 x 1682 x 1518"）
+                dimensions = self._parse_dimensions_string(source)
+                if dimensions:
+                    if not length and len(dimensions) > 0:
+                        length = dimensions[0]
+                    if not width and len(dimensions) > 1:
+                        width = dimensions[1]
+                    if not height and len(dimensions) > 2:
+                        height = dimensions[2]
+        
+        # フォーマット
+        result_parts = []
+        
+        # L x W x H 形式
+        if length and width and height:
+            result_parts.append(f"{length} mm x {width} mm x {height} mm")
+        elif length and width:
+            result_parts.append(f"{length} mm x {width} mm")
+        elif length:
+            result_parts.append(f"Length: {length} mm")
+        
+        # ホイールベース
+        if wheelbase:
+            result_parts.append(f"Wheelbase: {wheelbase} mm")
+        
+        # その他の寸法
+        result_parts.extend(other_dimensions)
+        
+        return "; ".join(result_parts) if result_parts else None
+    
+    def _extract_dimension_value(self, value: Any) -> Optional[int]:
+        """寸法値の抽出（文字列から数値を抽出）"""
+        if isinstance(value, (int, float)):
+            return int(value)
+        
+        if isinstance(value, str):
+            # 数値を抽出（mm, cm, m単位も考慮）
+            import re
+            
+            # mm単位の場合
+            mm_match = re.search(r'(\d{3,4})\s*mm', value)
+            if mm_match:
+                return int(mm_match.group(1))
+            
+            # cm単位の場合（mmに変換）
+            cm_match = re.search(r'(\d+(?:\.\d+)?)\s*cm', value)
+            if cm_match:
+                return int(float(cm_match.group(1)) * 10)
+            
+            # m単位の場合（mmに変換）
+            m_match = re.search(r'(\d+(?:\.\d+)?)\s*m', value)
+            if m_match:
+                return int(float(m_match.group(1)) * 1000)
+            
+            # 単位なしの数値（mmと仮定）
+            num_match = re.search(r'(\d{3,4})', value)
+            if num_match:
+                return int(num_match.group(1))
+        
+        return None
+    
+    def _parse_dimensions_string(self, dim_string: str) -> List[int]:
+        """寸法文字列から数値リストを抽出"""
+        if not dim_string:
+            return []
+        
+        import re
+        # "3673 x 1682 x 1518" や "3,673 mm x 1,682 mm x 1,518 mm" のような形式に対応
+        numbers = re.findall(r'(\d{1,2}[,.]?\d{3,4})', dim_string)
+        
+        result = []
+        for num_str in numbers:
+            # カンマや小数点を除去
+            clean_num = num_str.replace(',', '').replace('.', '')
+            try:
+                # 3桁以上の数値のみ採用（車の寸法として妥当）
+                if len(clean_num) >= 3:
+                    result.append(int(clean_num))
+            except ValueError:
+                continue
+        
+        return result
     
     def _process_array_field(self, field_data: Union[List, str, None]) -> List[str]:
         """配列フィールドの適切な処理"""
@@ -443,12 +579,51 @@ class DataProcessor:
         if isinstance(dimensions_data, dict):
             # 辞書形式の場合は文字列に変換
             parts = []
+            
+            # 標準的な寸法フィールドの順序で処理
+            dimension_order = ['length', 'width', 'height', 'wheelbase', 'ground_clearance']
+            
+            # 順序通りに処理
+            for key in dimension_order:
+                if key in dimensions_data and dimensions_data[key]:
+                    value = dimensions_data[key]
+                    # mm単位に変換（必要に応じて）
+                    if isinstance(value, (int, float)):
+                        parts.append(f"{value} mm")
+                    else:
+                        parts.append(str(value))
+            
+            # 順序にない他のキーも処理
             for key, value in dimensions_data.items():
-                if value:
-                    parts.append(f"{key}: {value}")
+                if key not in dimension_order and value:
+                    if isinstance(value, (int, float)):
+                        parts.append(f"{key}: {value} mm")
+                    else:
+                        parts.append(f"{key}: {value}")
+            
+            # 長さx幅x高さの形式で結合（最初の3つの値がある場合）
+            if len(parts) >= 3:
+                # 数値のみを抽出して L x W x H 形式にする
+                numeric_parts = []
+                for part in parts[:3]:
+                    # 数値部分のみを抽出
+                    import re
+                    numbers = re.findall(r'\d+(?:\.\d+)?', str(part))
+                    if numbers:
+                        numeric_parts.append(f"{numbers[0]} mm")
+                
+                if len(numeric_parts) >= 3:
+                    result = " x ".join(numeric_parts)
+                    # 残りの寸法情報も追加
+                    if len(parts) > 3:
+                        other_parts = parts[3:]
+                        result += f" ({', '.join(other_parts)})"
+                    return result
+            
             return "; ".join(parts) if parts else None
         
         if isinstance(dimensions_data, str):
+            # 文字列の場合、既にフォーマットされているものとして返す
             return dimensions_data
         
         return str(dimensions_data)
@@ -517,7 +692,8 @@ class DataProcessor:
                               doors: int, seats: int, colors: List, media_urls: List) -> List[Dict]:
         """デフォルトのStandardトリムペイロードを作成"""
         
-        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))
+        # デフォルト用の寸法処理
+        dimensions_processed = self._extract_and_format_dimensions(raw_data)
         
         # デフォルト用のグレードとエンジン情報
         default_grades = {
@@ -571,7 +747,7 @@ class DataProcessor:
             'engines': default_engines,
             'doors': doors,
             'seats': seats,
-            'dimensions_mm': self._process_dimensions(raw_data.get('dimensions')),
+            'dimensions_mm': dimensions_processed,
             'drive_type': '',
             'full_model_ja': f"{make_ja} {model_en}",
             'colors': colors,
