@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 carwow_scraper.py
-データ取得に特化したメインスクレイピングモジュール
+データ取得に特化したメインスクレイピングモジュール - 修正版
 """
 import re
 import json
@@ -469,7 +469,6 @@ class VehicleScraper:
     def _scrape_trims_improved(self, slug: str) -> List[Dict]:
         """トリム情報を正確に取得"""
         trims = []
-        model_name = slug.split('/')[-1].replace('-', ' ')
         
         try:
             spec_url = f"{BASE_URL}/{slug}/specifications"
@@ -478,7 +477,7 @@ class VehicleScraper:
             # リダイレクトチェック
             final_url = response.url
             if f"/{slug.split('/')[0]}#" in final_url:
-                return self._get_default_trims()
+                return []
             
             soup = BeautifulSoup(response.text, 'lxml')
             
@@ -493,73 +492,55 @@ class VehicleScraper:
                 
                 if found_trim_section:
                     text = elem.get_text()
-                    # 各トリムのパターン（例: "500e Standard", "500e Turismo"）
-                    if 'Standard' in text or 'Turismo' in text or 'Scorpionissima' in text:
+                    if any(word in text for word in ['Standard', 'Turismo', 'Scorpionissima', 'Sport', 'S line']):
                         trim_sections.append(elem)
             
             # テキスト全体から正確なトリム名を抽出
             page_text = soup.get_text()
             
-            # 既知のトリム名を探す
-            known_trims = {
-                'Standard': None,
-                'Turismo': None, 
-                'Scorpionissima': None
-            }
+            # 一般的なトリム名パターンを検索
+            known_trim_patterns = [
+                r'(\w+(?:\s+\w+)?)\s+RRP\s*£([\d,]+)',
+                r'(\w+(?:\s+\w+)?)\s+.*?£([\d,]+)',
+            ]
             
-            for trim_name in known_trims.keys():
-                # パターン: "モデル名 トリム名" + "RRP £価格"
-                patterns = [
-                    rf'500e\s+{trim_name}.*?RRP\s*£([\d,]+)',
-                    rf'{trim_name}.*?RRP\s*£([\d,]+)',
-                    rf'{trim_name}\s+RRP\s*£([\d,]+)'
-                ]
-                
-                for pattern in patterns:
-                    match = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        try:
-                            price = int(match.group(1).replace(',', ''))
-                            known_trims[trim_name] = price
-                            break
-                        except:
-                            pass
+            found_trims = {}
             
-            # 見つかったトリムをリストに追加
-            for trim_name, price in known_trims.items():
-                if price:  # 価格が見つかったトリムのみ
-                    trim_data = {
-                        'trim_name': trim_name,
-                        'engine': '114kW 42.2kWh Auto',
-                        'fuel_type': 'Electric',
-                        'power_bhp': 155,
-                        'transmission': 'Automatic',
-                        'drive_type': 'Front wheel drive',
-                        'price_rrp': price
-                    }
-                    trims.append(trim_data)
+            for pattern in known_trim_patterns:
+                matches = re.finditer(pattern, page_text, re.IGNORECASE)
+                for match in matches:
+                    trim_name = match.group(1).strip()
+                    try:
+                        price = int(match.group(2).replace(',', ''))
+                    except:
+                        continue
+                    
+                    # 有効なトリム名かチェック
+                    if (trim_name and len(trim_name) > 1 and 
+                        trim_name not in ['RRP', 'Used', 'From', 'Price'] and
+                        not trim_name.isdigit()):
+                        if trim_name not in found_trims or found_trims[trim_name]['price_rrp'] < price:
+                            found_trims[trim_name] = {
+                                'trim_name': trim_name,
+                                'engine': '',
+                                'fuel_type': 'Electric' if 'e' in slug else 'Petrol',
+                                'power_bhp': None,
+                                'transmission': 'Automatic',
+                                'drive_type': '',
+                                'price_rrp': price
+                            }
             
-            print(f"  Found {len(trims)} valid trims: {[t['trim_name'] for t in trims]}")
+            # 見つかったトリムをリストに変換
+            for trim_name, trim_data in found_trims.items():
+                trims.append(trim_data)
+            
+            if trims:
+                print(f"  Found {len(trims)} valid trims: {[t['trim_name'] for t in trims]}")
             
         except Exception as e:
             print(f"  Warning: Failed to get trims for {slug}: {e}")
         
-        if not trims:
-            trims = self._get_default_trims()
-            print(f"  Using default trim for {slug}")
-        
         return trims
-    
-    def _get_default_trims(self) -> List[Dict]:
-        """デフォルトトリム"""
-        return [{
-            'trim_name': 'Standard',
-            'engine': '',
-            'fuel_type': '',
-            'power_bhp': None,
-            'transmission': '',
-            'drive_type': ''
-        }]
     
     def _extract_images(self, soup: BeautifulSoup, product: Dict) -> List[str]:
         """画像URLを取得"""
@@ -610,7 +591,7 @@ class VehicleScraper:
             for element in soup.select('h4.model-hub__colour-details-title, .colour-name, .color-option'):
                 color = element.get_text(strip=True)
                 # 価格部分を除去
-                color = re.sub(r'(Free|£[\d,]+).*$', '', color).strip()
+                color = re.sub(r'(Free|£[\d,]+).*, '', color).strip()
                 
                 if color and color not in colors and len(color) < 50:
                     colors.append(color)
@@ -621,7 +602,7 @@ class VehicleScraper:
         return colors
     
     def _scrape_specifications(self, slug: str) -> Dict:
-        """詳細スペックを取得"""
+        """詳細スペックを取得（改善版 - 寸法情報を強化）"""
         spec_data = {}
         
         try:
@@ -649,6 +630,51 @@ class VehicleScraper:
                     value = dd.get_text(strip=True)
                     spec_data[key] = value
             
+            # External dimensions セクションを特別に処理
+            external_dims = {}
+            internal_dims = {}
+            
+            # ページテキストから寸法を抽出
+            page_text = soup.get_text()
+            
+            # 寸法パターンを検索
+            dimension_patterns = {
+                'length': [r'Length[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*length'],
+                'width': [r'Width[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*width'],
+                'height': [r'Height[:\s]*(\d{3,5}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{4,5})\s*mm.*height'],
+                'wheelbase': [r'Wheelbase[:\s]*(\d{1,3}(?:\.\d+)?)\s*(?:mm|m)', r'(\d{2,4})\s*mm.*wheelbase'],
+                'turning_circle': [r'Turning circle[:\s]*(\d{1,3}(?:\.\d+)?)\s*(?:mm|m)'],
+                'boot_seats_up': [r'Boot.*seats up.*?(\d{2,4})\s*L', r'(\d{2,4})\s*L.*boot'],
+                'boot_seats_down': [r'Boot.*seats down.*?(\d{3,4})\s*L', r'(\d{3,4})\s*L.*seats down']
+            }
+            
+            for dim_name, patterns in dimension_patterns.items():
+                for pattern in patterns:
+                    match = re.search(pattern, page_text, re.IGNORECASE)
+                    if match:
+                        try:
+                            value = float(match.group(1))
+                            # 単位変換（mからmm）
+                            if 'm' in pattern and value < 100:
+                                value = int(value * 1000)
+                            else:
+                                value = int(value)
+                            spec_data[dim_name] = str(value)
+                            break
+                        except:
+                            continue
+            
+            # HTMLの特定セクションから寸法を抽出
+            for section in soup.find_all(['section', 'div'], class_=re.compile('dimension|spec')):
+                for item in section.find_all(['dt', 'th', 'td']):
+                    text = item.get_text().lower()
+                    if any(dim in text for dim in ['length', 'width', 'height', 'wheelbase', 'boot', 'turning']):
+                        # 次の要素から値を取得
+                        next_elem = item.find_next(['dd', 'td'])
+                        if next_elem:
+                            value = next_elem.get_text().strip()
+                            spec_data[text] = value
+            
             # 寸法情報を構造化
             dimensions = self._extract_dimensions_from_spec(spec_data, soup.text)
             if dimensions:
@@ -660,30 +686,65 @@ class VehicleScraper:
         return {'specifications': spec_data}
     
     def _extract_dimensions_from_spec(self, spec_data: Dict, page_text: str) -> Optional[str]:
-        """寸法情報を抽出"""
-        dimensions = {'length': None, 'width': None, 'height': None}
+        """寸法情報を抽出（改善版）"""
+        dimensions = {'length': None, 'width': None, 'height': None, 'wheelbase': None}
         
-        LENGTH_KEYS = {'length', 'overall length', 'length (mm)', 'overall length (mm)'}
-        WIDTH_KEYS = {'width', 'overall width', 'width (mm)', 'overall width (mm)'}
-        HEIGHT_KEYS = {'height', 'overall height', 'height (mm)', 'overall height (mm)'}
+        # 標準的な寸法キーをチェック
+        dimension_mappings = {
+            'length': ['length', 'overall length', 'length (mm)', 'overall length (mm)', 'length mm'],
+            'width': ['width', 'overall width', 'width (mm)', 'overall width (mm)', 'width mm'],
+            'height': ['height', 'overall height', 'height (mm)', 'overall height (mm)', 'height mm'],
+            'wheelbase': ['wheelbase', 'wheelbase (mm)', 'wheelbase mm']
+        }
         
-        for key, value in spec_data.items():
-            key_lower = key.lower()
+        for dim_type, keys in dimension_mappings.items():
+            for key in keys:
+                if key in spec_data:
+                    value = self._extract_dimension_value(spec_data[key])
+                    if value:
+                        dimensions[dim_type] = value
+                        break
+        
+        # ページテキストから直接パターンマッチング
+        if not any(dimensions.values()):
+            patterns = [
+                r'(\d{4})\s*×\s*(\d{4})\s*×\s*(\d{4})\s*mm',  # 4973 × 1931 × 1498 mm
+                r'(\d{4})\s*x\s*(\d{4})\s*x\s*(\d{4})\s*mm',   # 4973 x 1931 x 1498 mm
+                r'L(\d{4})\s*×\s*W(\d{4})\s*×\s*H(\d{4})',     # L4973 × W1931 × H1498
+            ]
             
-            if any(lk in key_lower for lk in LENGTH_KEYS):
-                if match := re.search(r'(\d{3,4})', str(value)):
-                    dimensions['length'] = match.group(1)
-            elif any(wk in key_lower for wk in WIDTH_KEYS):
-                if match := re.search(r'(\d{3,4})', str(value)):
-                    dimensions['width'] = match.group(1)
-            elif any(hk in key_lower for hk in HEIGHT_KEYS):
-                if match := re.search(r'(\d{3,4})', str(value)):
-                    dimensions['height'] = match.group(1)
+            for pattern in patterns:
+                match = re.search(pattern, page_text)
+                if match:
+                    dimensions['length'] = int(match.group(1))
+                    dimensions['width'] = int(match.group(2))
+                    dimensions['height'] = int(match.group(3))
+                    break
         
-        if all(dimensions.values()):
-            return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
+        # フォーマット
+        result_parts = []
         
-        return None
+        if dimensions['length'] and dimensions['width'] and dimensions['height']:
+            result_parts.append(f"L{dimensions['length']} × W{dimensions['width']} × H{dimensions['height']} mm")
+        elif dimensions['length'] and dimensions['width']:
+            result_parts.append(f"L{dimensions['length']} × W{dimensions['width']} mm")
+        elif dimensions['length']:
+            result_parts.append(f"Length: {dimensions['length']} mm")
+        
+        if dimensions['wheelbase']:
+            result_parts.append(f"Wheelbase: {dimensions['wheelbase']} mm")
+        
+        # その他の寸法情報
+        other_dims = []
+        for key, value in spec_data.items():
+            if any(word in key for word in ['boot', 'turning', 'ground clearance', 'cargo']):
+                if isinstance(value, str) and value.strip():
+                    other_dims.append(f"{key.title()}: {value}")
+        
+        if other_dims:
+            result_parts.extend(other_dims[:3])  # 最大3つまで
+        
+        return "; ".join(result_parts) if result_parts else None
     
     def _determine_body_types(self, slug: str) -> List[str]:
         """ボディタイプを推定"""
@@ -724,6 +785,29 @@ class VehicleScraper:
             return None
         if match := re.search(r'\d+', str(text)):
             return int(match.group())
+        return None
+    
+    def _extract_dimension_value(self, value: Any) -> Optional[int]:
+        """寸法値の抽出（文字列から数値を抽出）"""
+        if isinstance(value, (int, float)):
+            return int(value)
+        
+        if isinstance(value, str):
+            # mm単位の場合
+            mm_match = re.search(r'(\d{3,5})\s*mm', value)
+            if mm_match:
+                return int(mm_match.group(1))
+            
+            # m単位の場合（mmに変換）
+            m_match = re.search(r'(\d+(?:\.\d+)?)\s*m', value)
+            if m_match:
+                return int(float(m_match.group(1)) * 1000)
+            
+            # 単位なしの数値（3-5桁）
+            num_match = re.search(r'(\d{3,5})', value)
+            if num_match:
+                return int(num_match.group(1))
+        
         return None
     
     def _is_valid_image_url(self, url: str) -> bool:
