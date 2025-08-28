@@ -371,7 +371,7 @@ class SyncManager:
             # スクレイピング
             raw_data = self.scraper.scrape_vehicle(slug)
             
-            # データ処理（1つのペイロードが返される）
+            # データ処理（1つまたは複数のペイロードが返される）
             payloads = self.processor.process_vehicle_data(raw_data)
             
             if not isinstance(payloads, list):
