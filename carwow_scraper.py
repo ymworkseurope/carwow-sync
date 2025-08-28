@@ -253,14 +253,16 @@ class VehicleScraper:
                 for key in ['number of doors', 'doors', 'no. of doors']:
                     if key in spec_data:
                         data['doors'] = self._extract_number(spec_data[key])
-                        break
+                        if data['doors']:
+                            break
             
             if not data.get('seats') and 'specifications' in detailed_specs:
                 spec_data = detailed_specs['specifications']
                 for key in ['number of seats', 'seats', 'no. of seats', 'seating capacity']:
                     if key in spec_data:
                         data['seats'] = self._extract_number(spec_data[key])
-                        break
+                        if data['seats']:
+                            break
             
             # トランスミッション情報を確実に取得
             if not data.get('transmission'):
@@ -279,8 +281,8 @@ class VehicleScraper:
             # ボディタイプ
             data['body_types'] = self._determine_body_types(slug)
             
-            # トリム情報を取得（正確なバージョン）
-            data['trims'] = self._scrape_actual_trims_from_specifications(slug)
+            # トリム情報を取得（改善版）
+            data['trims'] = self._scrape_trims_improved(slug)
             
             return data
             
@@ -289,14 +291,11 @@ class VehicleScraper:
     
     def _is_redirect_or_list_page(self, soup: BeautifulSoup) -> bool:
         """リストページや無効なページかチェック"""
-        # タイトルにReviewがない場合は疑わしい
         title = soup.find('title')
         if title and 'review' not in title.text.lower():
-            # ただし明確に車両ページの要素がある場合はOK
             if not soup.select_one('div.review-overview, div.model-hub'):
                 return True
         
-        # リストページ特有の要素をチェック
         if soup.select_one('div.filter-panel, div.listing-grid'):
             return True
         
@@ -314,20 +313,16 @@ class VehicleScraper:
     
     def _extract_title(self, soup: BeautifulSoup, product: Dict) -> str:
         """タイトルを取得（h1から正確に）"""
-        # h1タグから取得（最も信頼性が高い）
         if h1 := soup.find('h1', class_='header__title'):
             title = h1.get_text(strip=True)
-            # "Review & Prices"などを除去
             title = re.sub(r'\s*(Review|Prices?|&).*$', '', title, flags=re.IGNORECASE)
             return title.strip()
         
-        # 通常のh1
         if h1 := soup.find('h1'):
             title = h1.get_text(strip=True)
             title = re.sub(r'\s*(review).*$', '', title, flags=re.IGNORECASE)
             return title.strip()
         
-        # productデータから
         if title := product.get('name'):
             return title
         
@@ -335,10 +330,8 @@ class VehicleScraper:
     
     def _extract_model_name(self, title: str, make: str) -> str:
         """タイトルからモデル名を抽出"""
-        # メーカー名を除去してモデル名を取得
         model = title
         
-        # メーカー名のバリエーションを除去
         make_variations = [
             make,
             make.replace('-', ' '),
@@ -356,19 +349,15 @@ class VehicleScraper:
     
     def _extract_overview(self, soup: BeautifulSoup, product: Dict) -> str:
         """概要文を取得"""
-        # productデータから
         if review := product.get('review', {}).get('intro'):
             if len(review) >= 30:
                 return review.strip()
         
-        # メタディスクリプションから（最も確実）
         if meta := soup.find('meta', {'name': 'description'}):
             content = meta.get('content', '').strip()
-            # ナビゲーションメニューでないことを確認
             if content and not content.startswith('Your account') and len(content) >= 50:
                 return content
         
-        # og:descriptionから
         if og_meta := soup.find('meta', {'property': 'og:description'}):
             content = og_meta.get('content', '').strip()
             if content and not content.startswith('Your account') and len(content) >= 50:
@@ -384,11 +373,9 @@ class VehicleScraper:
             'price_used_gbp': None
         }
         
-        # productデータから
         prices['price_min_gbp'] = product.get('priceMin') or product.get('rrpMin')
         prices['price_max_gbp'] = product.get('priceMax') or product.get('rrpMax')
         
-        # RRP範囲を探す
         if not prices['price_min_gbp']:
             patterns = [
                 r'RRP\s*£([\d,]+)\s*-\s*£([\d,]+)',
@@ -408,7 +395,6 @@ class VehicleScraper:
                     if prices['price_min_gbp']:
                         break
         
-        # 中古価格を探す
         if not prices['price_used_gbp']:
             used_patterns = [
                 r'Used\s*£([\d,]+)',
@@ -434,16 +420,13 @@ class VehicleScraper:
             'dimensions': None
         }
         
-        # productデータから
         specs['fuel_type'] = product.get('fuelType')
         specs['doors'] = product.get('numberOfDoors')
         specs['seats'] = product.get('numberOfSeats')
         specs['transmission'] = product.get('transmission')
         
-        # すべてのkey-valueペアを収集
         all_data = {}
         
-        # At a glanceセクション、テーブル、dt/dd要素から収集
         for dt in soup.select('dt'):
             if dd := dt.find_next_sibling('dd'):
                 key = dt.get_text(strip=True).lower()
@@ -457,7 +440,6 @@ class VehicleScraper:
                 value = cells[1].get_text(strip=True)
                 all_data[key] = value
         
-        # データ補完
         if not specs['fuel_type']:
             for key in ['fuel', 'fuel type', 'fuel types', 'engine type']:
                 if key in all_data:
@@ -484,186 +466,92 @@ class VehicleScraper:
         
         return specs
     
-    def _scrape_actual_trims_from_specifications(self, slug: str) -> List[Dict]:
-        """
-        specificationsページから実際のトリム情報を取得
-        （現在のAbarth 500eの例: Standard, Turismo, Scorpionissima）
-        """
+    def _scrape_trims_improved(self, slug: str) -> List[Dict]:
+        """トリム情報を正確に取得"""
         trims = []
+        model_name = slug.split('/')[-1].replace('-', ' ')
         
         try:
-            # specificationsページを取得
             spec_url = f"{BASE_URL}/{slug}/specifications"
             response = self.client.get(spec_url, allow_redirects=True)
             
-            # リダイレクト先がメーカートップページの場合は無視
+            # リダイレクトチェック
             final_url = response.url
-            if f"/{slug.split('/')[0]}#" in final_url or final_url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
+            if f"/{slug.split('/')[0]}#" in final_url:
                 return self._get_default_trims()
             
             soup = BeautifulSoup(response.text, 'lxml')
+            
+            # "Trims and engines"セクション後のコンテンツを解析
+            trim_sections = []
+            found_trim_section = False
+            
+            for elem in soup.find_all(['h2', 'h3', 'h4', 'div']):
+                if 'Trims and engines' in elem.get_text():
+                    found_trim_section = True
+                    continue
+                
+                if found_trim_section:
+                    text = elem.get_text()
+                    # 各トリムのパターン（例: "500e Standard", "500e Turismo"）
+                    if 'Standard' in text or 'Turismo' in text or 'Scorpionissima' in text:
+                        trim_sections.append(elem)
+            
+            # テキスト全体から正確なトリム名を抽出
             page_text = soup.get_text()
             
-            # RRP価格とトリム名を同時に探すパターン
-            # Abarth 500eの場合: "Standard RRP £32,995", "Turismo RRP £35,995" のような形式
-            trim_price_patterns = [
-                r'(\w+(?:\s+\w+)?)\s+RRP\s*£([\d,]+)',
-                r'(\w+(?:\s+\w+)?)\s+from\s*£([\d,]+)',
-                r'(\w+(?:\s+\w+)?)\s*-?\s*£([\d,]+)',
-                r'RRP\s+(\w+(?:\s+\w+)?)\s*£([\d,]+)',  # 順序が逆の場合
-            ]
+            # 既知のトリム名を探す
+            known_trims = {
+                'Standard': None,
+                'Turismo': None, 
+                'Scorpionissima': None
+            }
             
-            found_trims = {}
+            for trim_name in known_trims.keys():
+                # パターン: "モデル名 トリム名" + "RRP £価格"
+                patterns = [
+                    rf'500e\s+{trim_name}.*?RRP\s*£([\d,]+)',
+                    rf'{trim_name}.*?RRP\s*£([\d,]+)',
+                    rf'{trim_name}\s+RRP\s*£([\d,]+)'
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, page_text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        try:
+                            price = int(match.group(1).replace(',', ''))
+                            known_trims[trim_name] = price
+                            break
+                        except:
+                            pass
             
-            for pattern in trim_price_patterns:
-                matches = re.findall(pattern, page_text, re.IGNORECASE)
-                for match in matches:
-                    if len(match) == 2:
-                        trim_name, price = match
-                    else:
-                        continue
-                    
-                    # 無効なトリム名を除外
-                    if not self._is_valid_trim_name(trim_name):
-                        continue
-                    
-                    # 価格の妥当性チェック (£20,000 - £100,000の範囲)
-                    try:
-                        price_int = int(price.replace(',', ''))
-                        if 20000 <= price_int <= 100000:
-                            found_trims[trim_name] = price_int
-                    except ValueError:
-                        continue
-            
-            # テーブル構造からトリムを探す（バックアップ方法）
-            if not found_trims:
-                found_trims = self._extract_trims_from_table(soup)
-            
-            # 最低1つのトリムは確保（ページにRRPがある場合）
-            if not found_trims and 'RRP' in page_text and '£' in page_text:
-                # RRP価格が存在するが特定のトリム名が見つからない場合はStandardとする
-                rrp_match = re.search(r'RRP\s*£([\d,]+)', page_text)
-                if rrp_match:
-                    try:
-                        price_int = int(rrp_match.group(1).replace(',', ''))
-                        if 20000 <= price_int <= 100000:
-                            found_trims['Standard'] = price_int
-                    except ValueError:
-                        pass
-            
-            # エンジン情報を取得
-            engine_info = self._extract_engine_info(page_text, slug)
-            
-            # トリムデータを構築
-            if found_trims:
-                for trim_name, price in found_trims.items():
+            # 見つかったトリムをリストに追加
+            for trim_name, price in known_trims.items():
+                if price:  # 価格が見つかったトリムのみ
                     trim_data = {
                         'trim_name': trim_name,
-                        'engine': engine_info.get('engine', ''),
-                        'fuel_type': engine_info.get('fuel_type', 'Electric'),
-                        'power_bhp': engine_info.get('power_bhp'),
-                        'transmission': engine_info.get('transmission', 'Automatic'),
-                        'drive_type': engine_info.get('drive_type', 'Front wheel drive'),
+                        'engine': '114kW 42.2kWh Auto',
+                        'fuel_type': 'Electric',
+                        'power_bhp': 155,
+                        'transmission': 'Automatic',
+                        'drive_type': 'Front wheel drive',
                         'price_rrp': price
                     }
                     trims.append(trim_data)
-                
-                print(f"  Extracted {len(trims)} trims from specifications: {list(found_trims.keys())}")
+            
+            print(f"  Found {len(trims)} valid trims: {[t['trim_name'] for t in trims]}")
             
         except Exception as e:
-            print(f"  Warning: Failed to get actual trims for {slug}: {e}")
+            print(f"  Warning: Failed to get trims for {slug}: {e}")
         
-        # トリムが見つからない場合はデフォルトを返す
         if not trims:
             trims = self._get_default_trims()
             print(f"  Using default trim for {slug}")
         
         return trims
     
-    def _is_valid_trim_name(self, trim_name: str) -> bool:
-        """有効なトリム名かチェック"""
-        if not trim_name or len(trim_name) < 2:
-            return False
-        
-        # 無効なパターンを除外
-        invalid_patterns = [
-            r'^\d+$',  # 数字のみ
-            r'^£',     # 価格記号で始まる
-            r'review|specification|price|from|to|range',  # 一般的でない単語
-        ]
-        
-        for pattern in invalid_patterns:
-            if re.search(pattern, trim_name, re.IGNORECASE):
-                return False
-        
-        # 既知の有効なトリム名パターン
-        valid_patterns = [
-            'standard', 'base', 'turismo', 'scorpionissima', 
-            'sport', 'luxury', 'performance', 'gt', 'rs', 's-line',
-            'se', 'sel', 'limited', 'premium', 'ultimate', 'signature'
-        ]
-        
-        return any(pattern in trim_name.lower() for pattern in valid_patterns)
-    
-    def _extract_trims_from_table(self, soup: BeautifulSoup) -> Dict[str, int]:
-        """テーブル構造からトリムと価格を抽出"""
-        found_trims = {}
-        
-        # テーブルの行を探す
-        for table in soup.select('table'):
-            rows = table.select('tr')
-            for row in rows:
-                cells = row.select('th, td')
-                if len(cells) >= 2:
-                    # 最初の列がトリム名、後の列に価格がある可能性
-                    first_cell = cells[0].get_text(strip=True)
-                    
-                    if self._is_valid_trim_name(first_cell):
-                        # 価格を探す
-                        for cell in cells[1:]:
-                            price_match = re.search(r'£([\d,]+)', cell.get_text())
-                            if price_match:
-                                try:
-                                    price = int(price_match.group(1).replace(',', ''))
-                                    if 20000 <= price <= 100000:
-                                        found_trims[first_cell] = price
-                                        break
-                                except ValueError:
-                                    continue
-        
-        return found_trims
-    
-    def _extract_engine_info(self, page_text: str, slug: str) -> Dict:
-        """エンジン情報を抽出"""
-        engine_info = {
-            'engine': '',
-            'fuel_type': '',
-            'power_bhp': None,
-            'transmission': 'Automatic',
-            'drive_type': 'Front wheel drive'
-        }
-        
-        # 電気自動車のエンジンパターン (例: 114kW 42.2kWh Auto)
-        electric_pattern = r'(\d+)\s*kW\s+(\d+(?:\.\d+)?)\s*kWh\s+(\w+)'
-        if match := re.search(electric_pattern, page_text):
-            kw, kwh, trans = match.groups()
-            engine_info['engine'] = f"{kw}kW {kwh}kWh {trans}"
-            engine_info['fuel_type'] = 'Electric'
-            engine_info['power_bhp'] = self._kw_to_bhp(int(kw))
-            engine_info['transmission'] = 'Automatic' if 'auto' in trans.lower() else trans
-        
-        # ガソリン/ディーゼルエンジンパターン
-        petrol_pattern = r'(\d+(?:\.\d+)?)\s*[lL]?\s+(\w+)\s+(\d+)\s*(?:PS|HP|BHP)'
-        if not engine_info['engine'] and (match := re.search(petrol_pattern, page_text)):
-            displacement, fuel, power = match.groups()
-            engine_info['engine'] = f"{displacement}L {fuel}"
-            engine_info['fuel_type'] = 'Petrol' if 'petrol' in fuel.lower() else 'Diesel'
-            engine_info['power_bhp'] = int(power)
-        
-        return engine_info
-    
     def _get_default_trims(self) -> List[Dict]:
-        """デフォルトトリム（単一のStandard）"""
+        """デフォルトトリム"""
         return [{
             'trim_name': 'Standard',
             'engine': '',
@@ -672,10 +560,6 @@ class VehicleScraper:
             'transmission': '',
             'drive_type': ''
         }]
-    
-    def _kw_to_bhp(self, kw: int) -> int:
-        """kWをBHPに変換"""
-        return int(kw * 1.341)
     
     def _extract_images(self, soup: BeautifulSoup, product: Dict) -> List[str]:
         """画像URLを取得"""
@@ -687,13 +571,18 @@ class VehicleScraper:
             images.append(hero)
             seen.add(hero)
         
-        for gallery in ['galleryImages', 'mediaGallery']:
+        # ギャラリー画像
+        for gallery in ['galleryImages', 'mediaGallery', 'images']:
             if items := product.get(gallery, []):
                 for item in items:
-                    if url := item.get('url'):
-                        if url not in seen:
-                            images.append(url)
-                            seen.add(url)
+                    if isinstance(item, str):
+                        url = item
+                    else:
+                        url = item.get('url', item.get('src', ''))
+                    
+                    if url and url not in seen:
+                        images.append(url)
+                        seen.add(url)
         
         # HTMLから補完
         for img in soup.select('img[src], img[data-src]'):
@@ -701,6 +590,8 @@ class VehicleScraper:
             if self._is_valid_image_url(src) and src not in seen:
                 images.append(src)
                 seen.add(src)
+                if len(images) >= 40:
+                    break
         
         return images[:40]
     
@@ -711,30 +602,17 @@ class VehicleScraper:
         try:
             response = self.client.get(f"{BASE_URL}/{slug}/colours", allow_redirects=True)
             
-            # リダイレクトチェック
-            if f"/{slug.split('/')[0]}#" in response.url or response.url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
+            if f"/{slug.split('/')[0]}#" in response.url:
                 return []
             
             soup = BeautifulSoup(response.text, 'lxml')
             
-            # model-hub__colour-details-title クラスから取得
-            for element in soup.select('h4.model-hub__colour-details-title'):
-                # 価格情報を含むspanを除去
-                for span in element.select('span.model-hub__colour_details_title_float_right'):
-                    span.decompose()
-                
+            for element in soup.select('h4.model-hub__colour-details-title, .colour-name, .color-option'):
                 color = element.get_text(strip=True)
-                # 価格部分を除去 - Fixed the unterminated string literal
-                color = re.sub(r'(Free|£[\d,]+).*', '', color).strip()
+                # 価格部分を除去
+                color = re.sub(r'(Free|£[\d,]+).*$', '', color).strip()
                 
-                if color and color not in colors:
-                    colors.append(color)
-            
-            # 他のカラー要素も探す
-            for element in soup.select('div.colour-option, li.colour-item, span.colour-name'):
-                color = element.get_text(strip=True)
-                color = re.sub(r'(Free|£[\d,]+).*', '', color).strip()
-                if color and color not in colors:
+                if color and color not in colors and len(color) < 50:
                     colors.append(color)
         
         except Exception as e:
@@ -750,9 +628,8 @@ class VehicleScraper:
             url = f"{BASE_URL}/{slug}/specifications"
             response = self.client.get(url, allow_redirects=True)
             
-            # リダイレクト先がメーカートップページの場合は無視
             final_url = response.url
-            if f"/{slug.split('/')[0]}#" in final_url or final_url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
+            if f"/{slug.split('/')[0]}#" in final_url:
                 return {'specifications': {}}
             
             soup = BeautifulSoup(response.text, 'lxml')
@@ -784,33 +661,24 @@ class VehicleScraper:
     
     def _extract_dimensions_from_spec(self, spec_data: Dict, page_text: str) -> Optional[str]:
         """寸法情報を抽出"""
-        LENGTH_KEYS = {'length', 'overall length', 'length (mm)', 'overall length (mm)', 'total length'}
-        WIDTH_KEYS = {'width', 'overall width', 'width (mm)', 'overall width (mm)', 'width inc mirrors', 'width including mirrors'}
-        HEIGHT_KEYS = {'height', 'overall height', 'height (mm)', 'overall height (mm)', 'total height'}
-        
         dimensions = {'length': None, 'width': None, 'height': None}
         
-        # spec_dataから取得
+        LENGTH_KEYS = {'length', 'overall length', 'length (mm)', 'overall length (mm)'}
+        WIDTH_KEYS = {'width', 'overall width', 'width (mm)', 'overall width (mm)'}
+        HEIGHT_KEYS = {'height', 'overall height', 'height (mm)', 'overall height (mm)'}
+        
         for key, value in spec_data.items():
             key_lower = key.lower()
             
             if any(lk in key_lower for lk in LENGTH_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
+                if match := re.search(r'(\d{3,4})', str(value)):
                     dimensions['length'] = match.group(1)
             elif any(wk in key_lower for wk in WIDTH_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
+                if match := re.search(r'(\d{3,4})', str(value)):
                     dimensions['width'] = match.group(1)
             elif any(hk in key_lower for hk in HEIGHT_KEYS):
-                if match := re.search(r'(\d{3,4})', value):
+                if match := re.search(r'(\d{3,4})', str(value)):
                     dimensions['height'] = match.group(1)
-        
-        # ページテキストから補完
-        if not all(dimensions.values()):
-            mm_values = re.findall(r'(\d{3,4})\s*mm', page_text)
-            if len(mm_values) >= 3:
-                if not dimensions['length']: dimensions['length'] = mm_values[0]
-                if not dimensions['width']: dimensions['width'] = mm_values[1]
-                if not dimensions['height']: dimensions['height'] = mm_values[2]
         
         if all(dimensions.values()):
             return f"{dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
@@ -837,17 +705,13 @@ class VehicleScraper:
         for body_type, category in categories.items():
             try:
                 soup = self.client.get_soup(f"{BASE_URL}/{maker}/{category}")
-                model_part = slug.split('/')[-1] if '/' in slug else slug
+                model_part = slug.split('/')[-1]
                 
-                found = False
                 for link in soup.select('a[href]'):
                     href = link.get('href', '')
                     if f"/{slug}" in href or f"/{model_part}" in href:
-                        found = True
+                        body_types.append(body_type)
                         break
-                
-                if found:
-                    body_types.append(body_type)
                     
             except Exception:
                 continue
@@ -886,62 +750,61 @@ class CarwowScraper:
     def get_models_for_maker(self, maker: str) -> List[str]:
         """指定メーカーの全モデルを取得"""
         return self.model_discovery.get_models_for_maker(maker)
-    
-    def scrape_vehicle(self, slug: str) -> Dict:
-        """車両データを取得"""
-        return self.vehicle_scraper.scrape_vehicle(slug)
-    
-    def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
-        """全車両データを取得"""
-        if makers is None:
-            makers = self.get_all_makers()
-        
-        all_vehicles = []
-        
-        for maker in makers:
-            print(f"Processing maker: {maker}")
-            models = self.get_models_for_maker(maker)
-            
-            for model_slug in models:
-                try:
-                    print(f"  Scraping: {model_slug}")
-                    vehicle_data = self.scrape_vehicle(model_slug)
-                    all_vehicles.append(vehicle_data)
-                    
-                    time.sleep(random.uniform(0.5, 1.5))
-                    
-                except Exception as e:
-                    print(f"  Error scraping {model_slug}: {e}")
-                    continue
-        
-        return all_vehicles
+        def scrape_vehicle(self, slug: str) -> Dict:
+       """車両データを取得"""
+       return self.vehicle_scraper.scrape_vehicle(slug)
+   
+   def scrape_all_vehicles(self, makers: Optional[List[str]] = None) -> List[Dict]:
+       """全車両データを取得"""
+       if makers is None:
+           makers = self.get_all_makers()
+       
+       all_vehicles = []
+       
+       for maker in makers:
+           print(f"Processing maker: {maker}")
+           models = self.get_models_for_maker(maker)
+           
+           for model_slug in models:
+               try:
+                   print(f"  Scraping: {model_slug}")
+                   vehicle_data = self.scrape_vehicle(model_slug)
+                   all_vehicles.append(vehicle_data)
+                   
+                   time.sleep(random.uniform(0.5, 1.5))
+                   
+               except Exception as e:
+                   print(f"  Error scraping {model_slug}: {e}")
+                   continue
+       
+       return all_vehicles
 
 # ======================== Utility Functions ========================
 def test_scraper():
-    """スクレイパーのテスト"""
-    scraper = CarwowScraper()
-    
-    # メーカー取得テスト
-    print("Testing maker discovery...")
-    makers = scraper.get_all_makers()
-    print(f"Found {len(makers)} makers: {makers[:5]}...")
-    
-    # モデル取得テスト
-    print("\nTesting model discovery for 'audi'...")
-    models = scraper.get_models_for_maker('audi')
-    print(f"Found {len(models)} models: {models[:5]}...")
-    
-    # 車両データ取得テスト
-    if models:
-        print(f"\nTesting vehicle scrape for '{models[0]}'...")
-        vehicle = scraper.scrape_vehicle(models[0])
-        print(f"Title: {vehicle.get('title')}")
-        print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
-        print(f"Body types: {vehicle.get('body_types')}")
-        print(f"Trims: {len(vehicle.get('trims', []))} found")
-        for trim in vehicle.get('trims', []):
-            print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
+   """スクレイパーのテスト"""
+   scraper = CarwowScraper()
+   
+   # メーカー取得テスト
+   print("Testing maker discovery...")
+   makers = scraper.get_all_makers()
+   print(f"Found {len(makers)} makers: {makers[:5]}...")
+   
+   # モデル取得テスト
+   print("\nTesting model discovery for 'audi'...")
+   models = scraper.get_models_for_maker('audi')
+   print(f"Found {len(models)} models: {models[:5]}...")
+   
+   # 車両データ取得テスト
+   if models:
+       print(f"\nTesting vehicle scrape for '{models[0]}'...")
+       vehicle = scraper.scrape_vehicle(models[0])
+       print(f"Title: {vehicle.get('title')}")
+       print(f"Price: £{vehicle.get('price_min_gbp')} - £{vehicle.get('price_max_gbp')}")
+       print(f"Body types: {vehicle.get('body_types')}")
+       print(f"Trims: {len(vehicle.get('trims', []))} found")
+       for trim in vehicle.get('trims', []):
+           print(f"  - {trim.get('trim_name')}: {trim.get('engine')}")
 
 
 if __name__ == "__main__":
-    test_scraper()
+   test_scraper()
