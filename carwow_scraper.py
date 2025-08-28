@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 carwow_scraper.py
-データ取得に特化したメインスクレイピングモジュール
+データ取得に特化したメインスクレイピングモジュール（修正版）
 """
 import re
 import json
@@ -279,13 +279,177 @@ class VehicleScraper:
             # ボディタイプ
             data['body_types'] = self._determine_body_types(slug)
             
-            # トリム情報を取得（改善版）
-            data['trims'] = self._scrape_trims_and_engines_improved(slug)
+            # トリム情報を取得（修正版）
+            data['trims'] = self._scrape_trims_from_specifications(slug)
             
             return data
             
         except Exception as e:
             raise Exception(f"Failed to scrape {slug}: {str(e)}")
+    
+    def _scrape_trims_from_specifications(self, slug: str) -> List[Dict]:
+        """specificationsページから正確なトリム情報を取得"""
+        trims = []
+        
+        try:
+            # specificationsページを取得
+            spec_url = f"{BASE_URL}/{slug}/specifications"
+            response = self.client.get(spec_url, allow_redirects=True)
+            
+            # リダイレクト先がメーカートップページの場合は基本トリムのみ返す
+            final_url = response.url
+            if f"/{slug.split('/')[0]}#" in final_url or final_url.rstrip('/') == f"{BASE_URL}/{slug.split('/')[0]}":
+                return [{
+                    'trim_name': 'Standard',
+                    'engine': '',
+                    'fuel_type': '',
+                    'power_bhp': None,
+                    'transmission': '',
+                    'drive_type': ''
+                }]
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # RRPテーブルから正確なトリム情報を抽出
+            trim_data = self._extract_trims_from_rrp_table(soup)
+            
+            # RRPテーブルがない場合は、別の方法で取得
+            if not trim_data:
+                trim_data = self._extract_trims_from_page_structure(soup, slug)
+            
+            # 各トリムに共通のエンジン情報を追加
+            common_engine_info = self._extract_common_engine_info(soup)
+            
+            for trim in trim_data:
+                trim.update(common_engine_info)
+                trims.append(trim)
+                
+        except Exception as e:
+            print(f"  Warning: Failed to get trims from specifications for {slug}: {e}")
+        
+        # デフォルトトリム
+        if not trims:
+            trims = [{
+                'trim_name': 'Standard',
+                'engine': '',
+                'fuel_type': '',
+                'power_bhp': None,
+                'transmission': '',
+                'drive_type': ''
+            }]
+        
+        return trims
+    
+    def _extract_trims_from_rrp_table(self, soup: BeautifulSoup) -> List[Dict]:
+        """RRPテーブルからトリム情報を抽出"""
+        trims = []
+        
+        # RRPテーブルを探す
+        for table in soup.select('table'):
+            table_text = table.get_text()
+            if 'RRP' in table_text:
+                rows = table.select('tr')
+                for row in rows[1:]:  # ヘッダー行をスキップ
+                    cells = row.select('th, td')
+                    if len(cells) >= 2:
+                        trim_name = cells[0].get_text(strip=True)
+                        price_text = cells[1].get_text(strip=True)
+                        
+                        # 有効なトリム名かチェック
+                        if (trim_name and 
+                            not trim_name.lower().startswith('model') and
+                            not trim_name.lower().startswith('price') and
+                            not trim_name.lower().startswith('rrp') and
+                            '£' in price_text):
+                            
+                            trims.append({
+                                'trim_name': trim_name,
+                                'price': price_text
+                            })
+        
+        return trims
+    
+    def _extract_trims_from_page_structure(self, soup: BeautifulSoup, slug: str) -> List[Dict]:
+        """ページ構造からトリム情報を抽出"""
+        trims = []
+        page_text = soup.get_text()
+        
+        # 特定のモデルの既知トリム
+        model_trims = {
+            'abarth/500e': ['Standard', 'Turismo', 'Scorpionissima'],
+            'abarth/500e-cabrio': ['Standard', 'Turismo', 'Scorpionissima'],
+            'abarth/abarth-600e': ['Standard', 'Turismo', 'Scorpionissima']
+        }
+        
+        if slug in model_trims:
+            for trim_name in model_trims[slug]:
+                # そのトリムが実際にページに記載されているかチェック
+                if trim_name.lower() in page_text.lower():
+                    trims.append({'trim_name': trim_name})
+        else:
+            # 一般的なトリム名パターンを探す
+            common_trims = ['Standard', 'Sport', 'Premium', 'Luxury', 'Performance', 'GT', 'S', 'RS']
+            for trim_name in common_trims:
+                # RRP価格と組み合わせて存在確認
+                pattern = rf'{trim_name}.*?RRP.*?£[\d,]+'
+                if re.search(pattern, page_text, re.IGNORECASE | re.DOTALL):
+                    trims.append({'trim_name': trim_name})
+        
+        return trims
+    
+    def _extract_common_engine_info(self, soup: BeautifulSoup) -> Dict:
+        """共通のエンジン情報を抽出"""
+        page_text = soup.get_text()
+        engine_info = {
+            'engine': '',
+            'fuel_type': '',
+            'power_bhp': None,
+            'transmission': '',
+            'drive_type': ''
+        }
+        
+        # エンジンパターンを探す
+        engine_patterns = [
+            r'(\d+)\s*kW\s+(\d+(?:\.\d+)?)\s*kWh\s+(\w+)',  # 114kW 42.2kWh Auto
+            r'(\d+)\s*hp\s+(\d+(?:\.\d+)?L?)\s*(\w+)',     # 155hp 1.4L Petrol
+        ]
+        
+        for pattern in engine_patterns:
+            if match := re.search(pattern, page_text):
+                if 'kW' in match.group(0):
+                    # 電気自動車
+                    kw = int(match.group(1))
+                    kwh = match.group(2)
+                    trans = match.group(3)
+                    
+                    engine_info['engine'] = f"{kw}kW {kwh}kWh {trans}"
+                    engine_info['fuel_type'] = 'Electric'
+                    engine_info['power_bhp'] = int(kw * 1.341)  # kWをBHPに変換
+                    engine_info['transmission'] = 'Automatic' if 'auto' in trans.lower() else trans
+                    engine_info['drive_type'] = 'Front wheel drive'  # デフォルト
+                else:
+                    # ガソリン車
+                    hp = int(match.group(1))
+                    engine_size = match.group(2)
+                    trans = match.group(3)
+                    
+                    engine_info['engine'] = f"{hp}hp {engine_size} {trans}"
+                    engine_info['fuel_type'] = 'Petrol'
+                    engine_info['power_bhp'] = hp
+                    engine_info['transmission'] = trans
+                    engine_info['drive_type'] = 'Front wheel drive'  # デフォルト
+                
+                break
+        
+        # トランスミッション情報を別途探す
+        if not engine_info['transmission']:
+            trans_patterns = ['Automatic', 'Manual', 'CVT', 'DSG']
+            for trans in trans_patterns:
+                if trans.lower() in page_text.lower():
+                    engine_info['transmission'] = trans
+                    break
+        
+        return engine_info
     
     def _is_redirect_or_list_page(self, soup: BeautifulSoup) -> bool:
         """リストページや無効なページかチェック"""
@@ -484,106 +648,6 @@ class VehicleScraper:
         
         return specs
     
-    def _scrape_trims_and_engines_improved(self, slug: str) -> List[Dict]:
-        """トリムとエンジン情報を取得（完全改善版）"""
-        trims = []
-        model_name = slug.split('/')[-1]
-        
-        try:
-            # メインページから__NEXT_DATA__を取得
-            main_soup = self.client.get_soup(f"{BASE_URL}/{slug}")
-            main_data = self._extract_next_data(main_soup)
-            
-            # トリム情報を探す（メインページから）
-            if 'props' in main_data:
-                page_props = main_data['props'].get('pageProps', {})
-                if 'trims' in page_props:
-                    for trim in page_props['trims']:
-                        trims.append(self._parse_trim_data(trim))
-            
-            # specificationsページから取得
-            spec_url = f"{BASE_URL}/{slug}#gref"  # #grefセクションにトリム情報がある
-            spec_soup = self.client.get_soup(spec_url)
-            spec_text = spec_soup.get_text()
-            
-            # トリム名パターンを探す（Standard, Turismo, Scorpionissima等）
-            known_trims = ['Standard', 'Turismo', 'Scorpionissima', 'Base', 'Sport', 
-                          'Premium', 'Luxury', 'Performance', 'GT', 'S', 'RS']
-            
-            found_trims = []
-            for trim_name in known_trims:
-                # RRPと組み合わせて探す
-                pattern = rf'{trim_name}.*?RRP\s*£([\d,]+)'
-                if re.search(pattern, spec_text, re.IGNORECASE | re.DOTALL):
-                    found_trims.append(trim_name)
-            
-            # エンジン情報パターン（114kW 42.2kWh Auto等）
-            engine_pattern = r'(\d+)\s*kW\s+(\d+(?:\.\d+)?)\s*kWh\s+(\w+)'
-            engine_matches = re.findall(engine_pattern, spec_text)
-            
-            # トリムとエンジンを組み合わせる
-            if found_trims and engine_matches:
-                for i, trim_name in enumerate(found_trims):
-                    engine_info = engine_matches[0] if engine_matches else ('', '', '')
-                    
-                    trim_data = {
-                        'trim_name': trim_name,
-                        'engine': f"{engine_info[0]}kW {engine_info[1]}kWh {engine_info[2]}" if engine_info[0] else '',
-                        'fuel_type': 'Electric' if 'kWh' in str(engine_info) else '',
-                        'power_bhp': self._kw_to_bhp(int(engine_info[0])) if engine_info[0] else None,
-                        'transmission': 'Automatic' if 'auto' in engine_info[2].lower() else engine_info[2],
-                        'drive_type': 'Front wheel drive'  # デフォルト
-                    }
-                    trims.append(trim_data)
-            
-            # 何も見つからない場合は、RRP価格の数だけトリムを作成
-            if not trims:
-                rrp_matches = re.findall(r'RRP\s*£([\d,]+)', spec_text)
-                if len(rrp_matches) >= 2:
-                    # 複数のRRP価格がある = 複数のトリム
-                    trim_names = ['Standard', 'Turismo', 'Scorpionissima'][:len(rrp_matches)]
-                    for trim_name in trim_names:
-                        trim_data = {
-                            'trim_name': trim_name,
-                            'engine': '114kW 42.2kWh Auto',  # Abarth 500eのデフォルト
-                            'fuel_type': 'Electric',
-                            'power_bhp': 155,
-                            'transmission': 'Automatic',
-                            'drive_type': 'Front wheel drive'
-                        }
-                        trims.append(trim_data)
-            
-        except Exception as e:
-            print(f"  Warning: Failed to get trims for {slug}: {e}")
-        
-        # デフォルトトリム
-        if not trims:
-            trims = [{
-                'trim_name': 'Standard',
-                'engine': '',
-                'fuel_type': '',
-                'power_bhp': None,
-                'transmission': '',
-                'drive_type': ''
-            }]
-        
-        return trims
-    
-    def _kw_to_bhp(self, kw: int) -> int:
-        """kWをBHPに変換"""
-        return int(kw * 1.341)
-    
-    def _parse_trim_data(self, trim: Dict) -> Dict:
-        """トリムデータをパース"""
-        return {
-            'trim_name': trim.get('name', 'Standard'),
-            'engine': trim.get('engine', ''),
-            'fuel_type': trim.get('fuelType', ''),
-            'power_bhp': trim.get('powerBhp'),
-            'transmission': trim.get('transmission', ''),
-            'drive_type': trim.get('driveType', '')
-        }
-    
     def _extract_images(self, soup: BeautifulSoup, product: Dict) -> List[str]:
         """画像URLを取得"""
         images = []
@@ -632,7 +696,7 @@ class VehicleScraper:
                 
                 color = element.get_text(strip=True)
                 # 価格部分を除去
-                color = re.sub(r'(Free|£[\d,]+).*$', '', color).strip()
+                color = re.sub(r'(Free|£[\d,]+).*, '', color).strip()
                 
                 if color and color not in colors:
                     colors.append(color)
@@ -640,7 +704,7 @@ class VehicleScraper:
             # 他のカラー要素も探す
             for element in soup.select('div.colour-option, li.colour-item, span.colour-name'):
                 color = element.get_text(strip=True)
-                color = re.sub(r'(Free|£[\d,]+).*$', '', color).strip()
+                color = re.sub(r'(Free|£[\d,]+).*, '', color).strip()
                 if color and color not in colors:
                     colors.append(color)
         
