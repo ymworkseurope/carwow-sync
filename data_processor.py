@@ -951,8 +951,14 @@ class DataValidator:
         # タイムスタンプの検証
         if 'updated_at' in payload:
             updated_at = payload['updated_at']
-            if not isinstance(updated_at, datetime):
-                errors.append(f"Field updated_at must be datetime, got {type(updated_at)}")
+            if not isinstance(updated_at, (datetime, str)):
+                errors.append(f"Field updated_at must be datetime or string, got {type(updated_at)}")
+            elif isinstance(updated_at, str):
+                # ISO形式の日時文字列かチェック
+                try:
+                    datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                except ValueError:
+                    errors.append(f"Field updated_at has invalid datetime format: {updated_at}")
         
         return len(errors) == 0, errors
     
@@ -988,7 +994,7 @@ class DataValidator:
                 'smallint': lambda v: isinstance(v, int) and -32768 <= v <= 32767,
                 'jsonb': lambda v: isinstance(v, dict),
                 'array': lambda v: isinstance(v, list),
-                'timestamp with time zone': lambda v: isinstance(v, datetime)
+                'timestamp with time zone': lambda v: isinstance(v, (datetime, str))
             }
             
             # 配列型の特別処理
@@ -1016,13 +1022,15 @@ class DataValidator:
             return False
 
 # ======================== Helper Functions ========================
-def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True) -> Dict:
+def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True, 
+                      prepare_for_db: bool = True) -> Dict:
     """
     バッチデータの処理
     
     Args:
         raw_data_list: 生データのリスト
         validator_enabled: バリデーション有効フラグ
+        prepare_for_db: データベース用の準備を行うかどうか
     
     Returns:
         処理結果の辞書 (success_count, error_count, payloads, errors)
@@ -1039,6 +1047,10 @@ def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True
         try:
             # データ処理
             payloads = processor.process_vehicle_data(raw_data)
+            
+            # データベース用の準備
+            if prepare_for_db:
+                payloads = [processor.prepare_for_database(payload) for payload in payloads]
             
             if validator_enabled:
                 # 各ペイロードのバリデーション
@@ -1138,13 +1150,17 @@ if __name__ == "__main__":
     processor = DataProcessor()
     payloads = processor.process_vehicle_data(sample_raw_data)
     
+    # データベース用に準備
+    db_ready_payloads = [processor.prepare_for_database(payload) for payload in payloads]
+    
     print(f"Generated {len(payloads)} payloads:")
-    for i, payload in enumerate(payloads):
+    for i, payload in enumerate(db_ready_payloads):
         print(f"  Payload {i+1}: {payload['make_en']} {payload['model_en']} {payload['trim_name']}")
+        print(f"    Updated at: {payload['updated_at']} ({type(payload['updated_at'])})")
     
     # バリデーションのテスト
     validator = DataValidator()
-    for i, payload in enumerate(payloads):
+    for i, payload in enumerate(db_ready_payloads):
         is_valid, errors = validator.validate_payload(payload)
         print(f"  Payload {i+1} validation: {'PASS' if is_valid else 'FAIL'}")
         if errors:
