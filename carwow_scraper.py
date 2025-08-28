@@ -724,8 +724,8 @@ class VehicleScraper:
                     span.decompose()
                 
                 color = element.get_text(strip=True)
-                # 価格部分を除去
-                color = re.sub(r'(Free|£[\d,]+).*, '', color).strip()
+                # 価格部分を除去 - Fixed the unterminated string literal
+                color = re.sub(r'(Free|£[\d,]+).*', '', color).strip()
                 
                 if color and color not in colors:
                     colors.append(color)
@@ -733,7 +733,7 @@ class VehicleScraper:
             # 他のカラー要素も探す
             for element in soup.select('div.colour-option, li.colour-item, span.colour-name'):
                 color = element.get_text(strip=True)
-                color = re.sub(r'(Free|£[\d,]+).*, '', color).strip()
+                color = re.sub(r'(Free|£[\d,]+).*', '', color).strip()
                 if color and color not in colors:
                     colors.append(color)
         
