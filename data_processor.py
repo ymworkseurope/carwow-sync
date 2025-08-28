@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 data_processor.py
-データ変換、翻訳、価格換算などの処理モジュール
+データ変換、翻訳、価格換算などの処理モジュール - 修正版
 """
 import os
 import re
@@ -219,14 +219,14 @@ class DataProcessor:
         body_types_en = raw_data.get('body_types', [])
         body_types_ja = [self.translator.translate_body_type(bt) for bt in body_types_en]
         
-        # 基本価格処理 - numericに合わせて小数点対応
-        price_min_gbp = self._safe_numeric(raw_data.get('price_min_gbp'))
-        price_max_gbp = self._safe_numeric(raw_data.get('price_max_gbp'))
-        price_used_gbp = self._safe_numeric(raw_data.get('price_used_gbp'))
+        # 基本価格処理 - 整数に変換（小数点を削除）
+        price_min_gbp = self._safe_int_price(raw_data.get('price_min_gbp'))
+        price_max_gbp = self._safe_int_price(raw_data.get('price_max_gbp'))
+        price_used_gbp = self._safe_int_price(raw_data.get('price_used_gbp'))
         
-        price_min_jpy = self._convert_to_jpy(price_min_gbp)
-        price_max_jpy = self._convert_to_jpy(price_max_gbp)
-        price_used_jpy = self._convert_to_jpy(price_used_gbp)
+        price_min_jpy = self._convert_to_jpy_int(price_min_gbp)
+        price_max_jpy = self._convert_to_jpy_int(price_max_gbp)
+        price_used_jpy = self._convert_to_jpy_int(price_used_gbp)
         
         # doors/seatsを取得 - smallintに合わせて型変更
         doors = self._safe_smallint(raw_data.get('doors'))
@@ -247,137 +247,148 @@ class DataProcessor:
         # トリムデータの検証とフィルタリング
         valid_trims = []
         for trim in trims:
-            trim_name = self._clean_trim_name(trim.get('trim_name', ''))
-            if self._is_valid_trim_name_for_processing(trim_name):
+            trim_name = self._clean_trim_name_for_grade(trim.get('trim_name', ''))
+            if self._is_valid_trim_name_for_processing(trim_name) and trim_name != 'Standard':
                 trim['trim_name'] = trim_name  # クリーンアップしたトリム名で更新
                 valid_trims.append(trim)
         
-        # 有効なトリムがない場合はStandardのみ作成
-        if not valid_trims:
-            valid_trims = [{'trim_name': 'Standard'}]
+        # 有効なトリムがない場合は空のリストのまま（無しとして扱う）
         
         # グレードとエンジン情報の収集
         all_grades = self._collect_grades(valid_trims)
         all_engines = self._collect_engines(valid_trims)
         
         # デバッグ用ログ
-        print(f"  Found {len(valid_trims)} valid trims: {[t.get('trim_name', 'Unknown') for t in valid_trims]}")
+        if valid_trims:
+            print(f"  Found {len(valid_trims)} valid trims: {[t.get('trim_name', 'Unknown') for t in valid_trims]}")
+        else:
+            print(f"  No valid trims found")
         
-        # 各トリムごとにペイロードを作成
-        payloads = []
-        for trim_index, trim in enumerate(valid_trims):
-            # トリム名の検証とクリーニング
-            trim_name = self._clean_trim_name(trim.get('trim_name', 'Standard'))
-            
-            # 無効なトリム名をスキップ
-            if not self._is_valid_trim_name_for_processing(trim_name):
-                print(f"    Skipping invalid trim: {trim_name}")
-                continue
-            
-            # UUID生成（トリムごとにユニーク）
-            trim_id = f"{raw_data['slug']}_{trim_name}_{trim_index}"
-            vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, trim_id))
-            
-            # トリム固有情報
-            engine = trim.get('engine', '')
-            
-            # トランスミッション処理
-            transmission_en = trim.get('transmission') or raw_data.get('transmission', '')
-            transmission_ja = self.translator.translate_transmission(transmission_en)
-            
-            # 燃料タイプ処理
-            fuel_en = trim.get('fuel_type') or raw_data.get('fuel_type', '')
-            fuel_ja = self.translator.translate_fuel(fuel_en)
-            
-            # ドライブタイプ処理
-            drive_en = trim.get('drive_type', '')
-            drive_ja = self.translator.translate_drive_type(drive_en)
-            
-            # full_model_jaの生成
-            full_model_parts = [make_ja, model_en]
-            if trim_name and trim_name != 'Standard':
-                full_model_parts.append(trim_name)
-            full_model_ja = ' '.join(full_model_parts)
-            
-            # トリム固有の価格があれば使用（なければベース価格）
-            trim_price_min = self._safe_numeric(trim.get('price_rrp')) or price_min_gbp
-            trim_price_max = trim_price_min or price_max_gbp  # RRP価格がある場合はそれを上限にも
-            
-            trim_price_min_jpy = self._convert_to_jpy(trim_price_min)
-            trim_price_max_jpy = self._convert_to_jpy(trim_price_max)
-            
-            # power_bhp - integerタイプに合わせて変更
-            power_bhp = self._safe_int(trim.get('power_bhp'))
-            
-            # スペック情報の整理
-            spec_json = self._compile_specifications(raw_data)
-            spec_json.update({
-                'trim_info': {
-                    'trim_name': trim_name,
-                    'engine': engine,
-                    'fuel_type': fuel_en,
-                    'power_bhp': power_bhp,
-                    'transmission': transmission_en,
-                    'drive_type': drive_en
-                },
-                'doors': doors,
-                'seats': seats,
-                'grade': trim_name,
-                'engine': engine
-            })
-            
-            payload = {
-                'id': vehicle_id,
-                'slug': raw_data['slug'],
-                'make_en': make_en,
-                'model_en': model_en,
-                'make_ja': make_ja,
-                'model_ja': model_ja,
-                'body_type': body_types_en,  # 配列として保持
-                'fuel': fuel_en,
-                'price_min_gbp': trim_price_min,
-                'price_max_gbp': trim_price_max,
-                'price_min_jpy': trim_price_min_jpy,
-                'price_max_jpy': trim_price_max_jpy,
-                'overview_en': raw_data.get('overview', ''),
-                'overview_ja': overview_ja,
-                'spec_json': spec_json,  # JSONBとして保存
-                'media_urls': media_urls,  # 配列として保持
-                'updated_at': datetime.utcnow(),
-                'body_type_ja': body_types_ja,  # 配列として保持
-                'catalog_url': raw_data.get('url'),
-                'grades': all_grades,  # JSONBとして新規追加
-                'engines': all_engines,  # JSONBとして新規追加
-                'doors': doors,
-                'seats': seats,
-                'dimensions_mm': dimensions_processed,
-                'drive_type': drive_en,
-                'full_model_ja': full_model_ja,
-                'colors': colors,  # 配列として保持
-                'drive_type_ja': drive_ja,
-                'price_used_gbp': price_used_gbp,
-                'price_used_jpy': price_used_jpy,
-                'transmission': transmission_en,
-                'transmission_ja': transmission_ja,
-                'fuel_ja': fuel_ja,
-                'power_bhp': power_bhp,
-                'trim_name': trim_name,
-                'engine': engine,
-                'grade': trim_name
-            }
-            
-            payloads.append(payload)
+        # 車両データを1つのペイロードとして作成（トリム情報は grades に含める）
+        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, raw_data['slug']))
         
-        # 最終チェック: 有効なペイロードがない場合はStandardを作成
-        if not payloads:
-            print(f"  No valid trims found, creating default Standard trim")
-            payloads = self._create_default_payload(raw_data, make_en, make_ja, model_en, model_ja,
-                                                  overview_ja, body_types_en, body_types_ja,
-                                                  price_min_gbp, price_max_gbp, price_used_gbp,
-                                                  price_min_jpy, price_max_jpy, price_used_jpy,
-                                                  doors, seats, colors, media_urls)
+        # トランスミッション処理（メインデータから）
+        transmission_en = raw_data.get('transmission', '')
+        transmission_ja = self.translator.translate_transmission(transmission_en)
         
-        return payloads
+        # 燃料タイプ処理（メインデータから）
+        fuel_en = raw_data.get('fuel_type', '')
+        fuel_ja = self.translator.translate_fuel(fuel_en)
+        
+        # ドライブタイプ処理（メインデータから）
+        drive_en = raw_data.get('drive_type', '')
+        drive_ja = self.translator.translate_drive_type(drive_en)
+        
+        # full_model_jaの生成
+        full_model_ja = f"{make_ja} {model_en}"
+        
+        # power_bhp - integerタイプに合わせて変更
+        power_bhp = None
+        if valid_trims:
+            # トリムがある場合は最初のトリムのpower_bhpを使用
+            power_bhp = self._safe_int(valid_trims[0].get('power_bhp'))
+        
+        # グレード名の決定 - トリムが見つからない場合は「無し」
+        grade = "無し"
+        engine = ""
+        
+        if valid_trims:
+            # 複数のトリムがある場合は代表的なものを選択
+            representative_trim = valid_trims[0]
+            grade = representative_trim.get('trim_name', '無し')
+            engine = representative_trim.get('engine', '')
+            
+            # power_bhpを更新
+            power_bhp = self._safe_int(representative_trim.get('power_bhp'))
+            
+            # 代表トリムのトランスミッション情報があれば使用
+            if representative_trim.get('transmission'):
+                transmission_en = representative_trim.get('transmission', '')
+                transmission_ja = self.translator.translate_transmission(transmission_en)
+            
+            # 代表トリムの燃料情報があれば使用
+            if representative_trim.get('fuel_type'):
+                fuel_en = representative_trim.get('fuel_type', '')
+                fuel_ja = self.translator.translate_fuel(fuel_en)
+            
+            # 代表トリムのドライブタイプ情報があれば使用
+            if representative_trim.get('drive_type'):
+                drive_en = representative_trim.get('drive_type', '')
+                drive_ja = self.translator.translate_drive_type(drive_en)
+        
+        # スペック情報の整理
+        spec_json = self._compile_specifications(raw_data)
+        spec_json.update({
+            'doors': doors,
+            'seats': seats,
+            'grade': grade,
+            'engine': engine,
+            'representative_trim': grade if grade != "無し" else None
+        })
+        
+        payload = {
+            'id': vehicle_id,
+            'slug': raw_data['slug'],
+            'make_en': make_en,
+            'model_en': model_en,
+            'make_ja': make_ja,
+            'model_ja': model_ja,
+            'body_type': body_types_en,  # 配列として保持
+            'fuel': fuel_en,
+            'price_min_gbp': price_min_gbp,
+            'price_max_gbp': price_max_gbp,
+            'price_min_jpy': price_min_jpy,
+            'price_max_jpy': price_max_jpy,
+            'overview_en': raw_data.get('overview', ''),
+            'overview_ja': overview_ja,
+            'spec_json': spec_json,  # JSONBとして保存
+            'media_urls': media_urls,  # 配列として保持
+            'updated_at': datetime.utcnow().isoformat() + 'Z',  # ISO文字列に変換
+            'body_type_ja': body_types_ja,  # 配列として保持
+            'catalog_url': raw_data.get('url'),
+            'grades': all_grades,  # JSONBとして新規追加
+            'engines': all_engines,  # JSONBとして新規追加
+            'doors': doors,
+            'seats': seats,
+            'dimensions_mm': dimensions_processed,
+            'drive_type': drive_en,
+            'full_model_ja': full_model_ja,
+            'colors': colors,  # 配列として保持
+            'drive_type_ja': drive_ja,
+            'price_used_gbp': price_used_gbp,
+            'price_used_jpy': price_used_jpy,
+            'transmission': transmission_en,
+            'transmission_ja': transmission_ja,
+            'fuel_ja': fuel_ja,
+            'power_bhp': power_bhp,
+            'engine': engine,
+            'grade': grade
+        }
+        
+        return [payload]
+    
+    def _safe_int_price(self, value: Any) -> Optional[int]:
+        """価格用の安全な整数変換（小数点を除去）"""
+        if value is None:
+            return None
+        
+        if isinstance(value, (int, float)):
+            return int(value)  # floatの場合は整数部分のみ
+        
+        if isinstance(value, str):
+            cleaned = value.replace(',', '').replace('£', '').replace('¥', '')
+            try:
+                return int(float(cleaned))  # floatを経由して整数に変換
+            except (ValueError, TypeError):
+                pass
+        
+        return None
+    
+    def _convert_to_jpy_int(self, gbp: Optional[int]) -> Optional[int]:
+        """GBPからJPYに変換（整数）"""
+        if gbp is None:
+            return None
+        return int(gbp * GBP_TO_JPY)
     
     def _collect_grades(self, trims: List[Dict]) -> Dict:
         """全トリムからグレード情報を収集してJSONB形式で構造化"""
@@ -385,6 +396,9 @@ class DataProcessor:
         
         for trim in trims:
             trim_name = trim.get('trim_name', 'Standard')
+            if trim_name == 'Standard':
+                continue  # Standardは除外
+                
             grade_info = {
                 'name': trim_name,
                 'engine': trim.get('engine', ''),
@@ -392,7 +406,7 @@ class DataProcessor:
                 'transmission': trim.get('transmission', ''),
                 'fuel_type': trim.get('fuel_type', ''),
                 'drive_type': trim.get('drive_type', ''),
-                'price_rrp': self._safe_numeric(trim.get('price_rrp'))
+                'price_rrp': self._safe_int_price(trim.get('price_rrp'))
             }
             
             # Noneの値を除去
@@ -419,65 +433,82 @@ class DataProcessor:
             # トリム名をエンジンに関連付け
             if engine and engine in engines:
                 trim_name = trim.get('trim_name', 'Standard')
-                if trim_name not in engines[engine]['associated_trims']:
+                if trim_name != 'Standard' and trim_name not in engines[engine]['associated_trims']:
                     engines[engine]['associated_trims'].append(trim_name)
         
+        return engines
+    
     def _extract_and_format_dimensions(self, raw_data: Dict) -> Optional[str]:
-        """寸法データの抽出とフォーマット"""
+        """寸法データの抽出とフォーマット（改善版）"""
         # 複数のソースから寸法情報を取得
         dimensions_sources = [
             raw_data.get('dimensions'),
             raw_data.get('external_dimensions'),
             raw_data.get('specifications', {}).get('dimensions'),
             raw_data.get('specifications', {}).get('external_dimensions'),
+            raw_data.get('specifications', {}).get('dimensions_structured'),
             raw_data.get('specs', {}).get('dimensions')
         ]
         
-        # 各ソースから寸法情報を抽出
+        # specifications内の個別フィールドもチェック
+        spec_data = raw_data.get('specifications', {})
+        
+        # 寸法の抽出
         length = None
         width = None
         height = None
         wheelbase = None
-        other_dimensions = []
+        other_dimensions = {}
         
+        # specifications内の個別フィールドから抽出
+        dimension_keys = {
+            'length': ['length', 'length (mm)', 'length mm', 'overall length', 'overall length (mm)', 'length (excluding bumpers)'],
+            'width': ['width', 'width (mm)', 'width mm', 'overall width', 'overall width (mm)', 'width (excluding mirrors)', 'width (including mirrors)'],
+            'height': ['height', 'height (mm)', 'height mm', 'overall height', 'overall height (mm)'],
+            'wheelbase': ['wheelbase', 'wheelbase (mm)', 'wheelbase mm']
+        }
+        
+        for dim_type, keys in dimension_keys.items():
+            for key in keys:
+                if key.lower() in [k.lower() for k in spec_data.keys()]:
+                    # 実際のキーを見つける（大文字小文字を考慮）
+                    actual_key = next(k for k in spec_data.keys() if k.lower() == key.lower())
+                    value = self._extract_dimension_value(spec_data[actual_key])
+                    if value:
+                        if dim_type == 'length' and not length:
+                            length = value
+                        elif dim_type == 'width' and not width:
+                            width = value
+                        elif dim_type == 'height' and not height:
+                            height = value
+                        elif dim_type == 'wheelbase' and not wheelbase:
+                            wheelbase = value
+                        break
+        
+        # 他のソースからも情報を取得
         for source in dimensions_sources:
             if not source:
                 continue
                 
             if isinstance(source, dict):
-                # 長さの取得（複数のキー名をチェック）
-                for key in ['length', 'length_mm', 'overall_length', 'Length']:
-                    if not length and key in source:
-                        length = self._extract_dimension_value(source[key])
-                        break
-                
-                # 幅の取得
-                for key in ['width', 'width_mm', 'overall_width', 'Width']:
-                    if not width and key in source:
-                        width = self._extract_dimension_value(source[key])
-                        break
-                
-                # 高さの取得
-                for key in ['height', 'height_mm', 'overall_height', 'Height']:
-                    if not height and key in source:
-                        height = self._extract_dimension_value(source[key])
-                        break
-                
-                # ホイールベースの取得
-                for key in ['wheelbase', 'wheelbase_mm', 'Wheelbase']:
-                    if not wheelbase and key in source:
-                        wheelbase = self._extract_dimension_value(source[key])
-                        break
-                
-                # その他の寸法情報
                 for key, value in source.items():
-                    if key.lower() not in ['length', 'width', 'height', 'wheelbase', 'length_mm', 'width_mm', 'height_mm', 'wheelbase_mm']:
-                        dim_value = self._extract_dimension_value(value)
-                        if dim_value:
-                            other_dimensions.append(f"{key}: {dim_value} mm")
+                    key_lower = key.lower()
+                    dim_value = self._extract_dimension_value(value)
+                    
+                    if dim_value:
+                        if not length and any(k in key_lower for k in ['length', 'long']):
+                            length = dim_value
+                        elif not width and 'width' in key_lower:
+                            width = dim_value
+                        elif not height and 'height' in key_lower:
+                            height = dim_value
+                        elif not wheelbase and 'wheelbase' in key_lower:
+                            wheelbase = dim_value
+                        else:
+                            other_dimensions[key] = dim_value
             
             elif isinstance(source, str):
-                # 文字列から寸法を抽出（例: "3673 x 1682 x 1518"）
+                # 文字列から寸法を抽出
                 dimensions = self._parse_dimensions_string(source)
                 if dimensions:
                     if not length and len(dimensions) > 0:
@@ -492,9 +523,9 @@ class DataProcessor:
         
         # L x W x H 形式
         if length and width and height:
-            result_parts.append(f"{length} mm x {width} mm x {height} mm")
+            result_parts.append(f"L{length} × W{width} × H{height} mm")
         elif length and width:
-            result_parts.append(f"{length} mm x {width} mm")
+            result_parts.append(f"L{length} × W{width} mm")
         elif length:
             result_parts.append(f"Length: {length} mm")
         
@@ -502,8 +533,11 @@ class DataProcessor:
         if wheelbase:
             result_parts.append(f"Wheelbase: {wheelbase} mm")
         
-        # その他の寸法
-        result_parts.extend(other_dimensions)
+        # その他の重要な寸法
+        important_dims = ['ground clearance', 'boot capacity', 'turning circle', 'kerb weight']
+        for key, value in other_dimensions.items():
+            if any(dim in key.lower() for dim in important_dims):
+                result_parts.append(f"{key}: {value}")
         
         return "; ".join(result_parts) if result_parts else None
     
@@ -517,7 +551,7 @@ class DataProcessor:
             import re
             
             # mm単位の場合
-            mm_match = re.search(r'(\d{3,4})\s*mm', value)
+            mm_match = re.search(r'(\d{3,5})\s*mm', value)
             if mm_match:
                 return int(mm_match.group(1))
             
@@ -531,8 +565,13 @@ class DataProcessor:
             if m_match:
                 return int(float(m_match.group(1)) * 1000)
             
-            # 単位なしの数値（mmと仮定）
-            num_match = re.search(r'(\d{3,4})', value)
+            # カンマ区切りの数値
+            comma_match = re.search(r'(\d{1,2},\d{3})', value)
+            if comma_match:
+                return int(comma_match.group(1).replace(',', ''))
+            
+            # 単位なしの数値（mmと仮定、3桁以上）
+            num_match = re.search(r'(\d{3,5})', value)
             if num_match:
                 return int(num_match.group(1))
         
@@ -544,7 +583,7 @@ class DataProcessor:
             return []
         
         import re
-        # "3673 x 1682 x 1518" や "3,673 mm x 1,682 mm x 1,518 mm" のような形式に対応
+        # "4,973 mm x 1,931 mm x 1,498 mm" や "4973 x 1931 x 1498" のような形式に対応
         numbers = re.findall(r'(\d{1,2}[,.]?\d{3,4})', dim_string)
         
         result = []
@@ -574,80 +613,6 @@ class DataProcessor:
         
         return []
     
-    def _process_dimensions(self, dimensions_data: Union[Dict, str, None]) -> Optional[str]:
-        """寸法データの処理"""
-        if not dimensions_data:
-            return None
-        
-        if isinstance(dimensions_data, dict):
-            # 辞書形式の場合は文字列に変換
-            parts = []
-            
-            # 標準的な寸法フィールドの順序で処理
-            dimension_order = ['length', 'width', 'height', 'wheelbase', 'ground_clearance']
-            
-            # 順序通りに処理
-            for key in dimension_order:
-                if key in dimensions_data and dimensions_data[key]:
-                    value = dimensions_data[key]
-                    # mm単位に変換（必要に応じて）
-                    if isinstance(value, (int, float)):
-                        parts.append(f"{value} mm")
-                    else:
-                        parts.append(str(value))
-            
-            # 順序にない他のキーも処理
-            for key, value in dimensions_data.items():
-                if key not in dimension_order and value:
-                    if isinstance(value, (int, float)):
-                        parts.append(f"{key}: {value} mm")
-                    else:
-                        parts.append(f"{key}: {value}")
-            
-            # 長さx幅x高さの形式で結合（最初の3つの値がある場合）
-            if len(parts) >= 3:
-                # 数値のみを抽出して L x W x H 形式にする
-                numeric_parts = []
-                for part in parts[:3]:
-                    # 数値部分のみを抽出
-                    import re
-                    numbers = re.findall(r'\d+(?:\.\d+)?', str(part))
-                    if numbers:
-                        numeric_parts.append(f"{numbers[0]} mm")
-                
-                if len(numeric_parts) >= 3:
-                    result = " x ".join(numeric_parts)
-                    # 残りの寸法情報も追加
-                    if len(parts) > 3:
-                        other_parts = parts[3:]
-                        result += f" ({', '.join(other_parts)})"
-                    return result
-            
-            return "; ".join(parts) if parts else None
-        
-        if isinstance(dimensions_data, str):
-            # 文字列の場合、既にフォーマットされているものとして返す
-            return dimensions_data
-        
-        return str(dimensions_data)
-    
-    def _safe_numeric(self, value: Any) -> Optional[float]:
-        """安全な数値変換（numeric型対応）"""
-        if value is None:
-            return None
-        
-        if isinstance(value, (int, float)):
-            return float(value)
-        
-        if isinstance(value, str):
-            cleaned = value.replace(',', '').replace('£', '').replace('¥', '')
-            try:
-                return float(cleaned)
-            except (ValueError, TypeError):
-                pass
-        
-        return None
-    
     def _safe_smallint(self, value: Any) -> Optional[int]:
         """安全なsmallint変換"""
         if value is None:
@@ -662,12 +627,6 @@ class DataProcessor:
             pass
         
         return None
-    
-    def _convert_to_jpy(self, gbp: Optional[float]) -> Optional[float]:
-        """GBPからJPYに変換"""
-        if gbp is None:
-            return None
-        return gbp * GBP_TO_JPY
     
     def _is_valid_trim_name_for_processing(self, trim_name: str) -> bool:
         """処理用のトリム名妥当性チェック"""
@@ -687,89 +646,6 @@ class DataProcessor:
         
         return True
     
-    def _create_default_payload(self, raw_data: Dict, make_en: str, make_ja: str, 
-                              model_en: str, model_ja: str, overview_ja: str,
-                              body_types_en: List, body_types_ja: List,
-                              price_min_gbp: float, price_max_gbp: float, price_used_gbp: float,
-                              price_min_jpy: float, price_max_jpy: float, price_used_jpy: float,
-                              doors: int, seats: int, colors: List, media_urls: List) -> List[Dict]:
-        """デフォルトのStandardトリムペイロードを作成"""
-        
-        # デフォルト用の寸法処理
-        dimensions_processed = self._extract_and_format_dimensions(raw_data)
-        
-        vehicle_id = str(uuid.uuid5(UUID_NAMESPACE, f"{raw_data['slug']}_Standard_0"))
-        
-        # デフォルト用のグレードとエンジン情報
-        default_grades = {
-            'Standard': {
-                'name': 'Standard',
-                'engine': '',
-                'fuel_type': raw_data.get('fuel_type', ''),
-                'transmission': raw_data.get('transmission', '')
-            }
-        }
-        
-        default_engines = {}
-        
-        spec_json = self._compile_specifications(raw_data)
-        spec_json.update({
-            'trim_info': {
-                'trim_name': 'Standard',
-                'engine': '',
-                'fuel_type': raw_data.get('fuel_type', ''),
-                'power_bhp': None,
-                'transmission': raw_data.get('transmission', ''),
-                'drive_type': ''
-            },
-            'doors': doors,
-            'seats': seats,
-            'grade': 'Standard',
-            'engine': ''
-        })
-        
-        payload = {
-            'id': vehicle_id,
-            'slug': raw_data['slug'],
-            'make_en': make_en,
-            'model_en': model_en,
-            'make_ja': make_ja,
-            'model_ja': model_ja,
-            'body_type': body_types_en,
-            'fuel': raw_data.get('fuel_type', ''),
-            'price_min_gbp': price_min_gbp,
-            'price_max_gbp': price_max_gbp,
-            'price_min_jpy': price_min_jpy,
-            'price_max_jpy': price_max_jpy,
-            'overview_en': raw_data.get('overview', ''),
-            'overview_ja': overview_ja,
-            'spec_json': spec_json,
-            'media_urls': media_urls,
-            'updated_at': datetime.utcnow(),
-            'body_type_ja': body_types_ja,
-            'catalog_url': raw_data.get('url'),
-            'grades': default_grades,
-            'engines': default_engines,
-            'doors': doors,
-            'seats': seats,
-            'dimensions_mm': dimensions_processed,
-            'drive_type': '',
-            'full_model_ja': f"{make_ja} {model_en}",
-            'colors': colors,
-            'drive_type_ja': '',
-            'price_used_gbp': price_used_gbp,
-            'price_used_jpy': price_used_jpy,
-            'transmission': raw_data.get('transmission', ''),
-            'transmission_ja': self.translator.translate_transmission(raw_data.get('transmission', '')),
-            'fuel_ja': self.translator.translate_fuel(raw_data.get('fuel_type', '')),
-            'power_bhp': None,
-            'trim_name': 'Standard',
-            'engine': '',
-            'grade': 'Standard'
-        }
-        
-        return [payload]
-    
     def _clean_make_name(self, make: str) -> str:
         """メーカー名のクリーニング"""
         make = make.replace('-', ' ')
@@ -788,30 +664,31 @@ class DataProcessor:
         
         return make.title()
     
-    def _clean_trim_name(self, trim_name: str) -> str:
-        """トリム名のクリーニング（改良版）"""
+    def _clean_trim_name_for_grade(self, trim_name: str) -> str:
+        """グレード用のトリム名のクリーニング（改良版）"""
         if not trim_name:
-            return "Standard"
+            return "無し"
         
         # 前後の空白を除去
         cleaned = trim_name.strip()
         
-        # 無効なパターンをStandardに置換
+        # 無効なパターンをチェック
         invalid_patterns = [
             r'^\d+\s*s?$',  # "0", "2", "0s", "2s"
             r'^s$',         # "s" のみ
             r'^0\s',        # "0 " で始まる
+            r'^standard$',  # "standard"（大文字小文字問わず）
         ]
         
         for pattern in invalid_patterns:
             if re.match(pattern, cleaned, re.IGNORECASE):
-                return 'Standard'
+                return "無し"
         
         # 不要な部分を除去
         patterns_to_remove = [
             r'\b\d+\s*s\b',      # "2 s", "0 s" など
             r'^\d+\s+',          # 先頭の数字とスペース
-            r'\s+\d+$',          # 末尾のスペースと数字
+            r'\s+\d+,          # 末尾のスペースと数字
         ]
         
         for pattern in patterns_to_remove:
@@ -821,7 +698,7 @@ class DataProcessor:
         
         # 最終チェック: 空文字や短すぎる場合
         if not cleaned or len(cleaned) < 2:
-            return 'Standard'
+            return "無し"
         
         return cleaned
     
@@ -907,10 +784,10 @@ class DataValidator:
             if not slug or '/' not in slug:
                 errors.append(f"Invalid slug format: {slug}")
         
-        # トリム名の妥当性チェック
-        trim_name = payload.get('trim_name', '')
-        if trim_name and len(trim_name.strip()) < 2:
-            errors.append(f"Invalid trim_name: {trim_name}")
+        # グレード名の妥当性チェック
+        grade = payload.get('grade', '')
+        if not grade:
+            errors.append("Grade field is missing")
         
         # 価格の妥当性チェック
         price_min = payload.get('price_min_gbp')
@@ -956,9 +833,9 @@ class DataValidator:
         # タイムスタンプの検証
         if 'updated_at' in payload:
             updated_at = payload['updated_at']
-            if not isinstance(updated_at, (datetime, str)):
-                errors.append(f"Field updated_at must be datetime or string, got {type(updated_at)}")
-            elif isinstance(updated_at, str):
+            if not isinstance(updated_at, str):
+                errors.append(f"Field updated_at must be string, got {type(updated_at)}")
+            else:
                 # ISO形式の日時文字列かチェック
                 try:
                     datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
@@ -999,7 +876,7 @@ class DataValidator:
                 'smallint': lambda v: isinstance(v, int) and -32768 <= v <= 32767,
                 'jsonb': lambda v: isinstance(v, dict),
                 'array': lambda v: isinstance(v, list),
-                'timestamp with time zone': lambda v: isinstance(v, (datetime, str))
+                'timestamp with time zone': lambda v: isinstance(v, str)
             }
             
             # 配列型の特別処理
@@ -1027,15 +904,13 @@ class DataValidator:
             return False
 
 # ======================== Helper Functions ========================
-def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True, 
-                      prepare_for_db: bool = True) -> Dict:
+def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True) -> Dict:
     """
     バッチデータの処理
     
     Args:
         raw_data_list: 生データのリスト
         validator_enabled: バリデーション有効フラグ
-        prepare_for_db: データベース用の準備を行うかどうか
     
     Returns:
         処理結果の辞書 (success_count, error_count, payloads, errors)
@@ -1052,10 +927,6 @@ def process_batch_data(raw_data_list: List[Dict], validator_enabled: bool = True
         try:
             # データ処理
             payloads = processor.process_vehicle_data(raw_data)
-            
-            # データベース用の準備
-            if prepare_for_db:
-                payloads = [processor.prepare_for_database(payload) for payload in payloads]
             
             if validator_enabled:
                 # 各ペイロードのバリデーション
@@ -1155,17 +1026,15 @@ if __name__ == "__main__":
     processor = DataProcessor()
     payloads = processor.process_vehicle_data(sample_raw_data)
     
-    # データベース用に準備
-    db_ready_payloads = [processor.prepare_for_database(payload) for payload in payloads]
-    
-    print(f"Generated {len(payloads)} payloads:")
-    for i, payload in enumerate(db_ready_payloads):
-        print(f"  Payload {i+1}: {payload['make_en']} {payload['model_en']} {payload['trim_name']}")
+    print(f"Generated {len(payloads)} payload(s):")
+    for i, payload in enumerate(payloads):
+        print(f"  Payload {i+1}: {payload['make_en']} {payload['model_en']} - Grade: {payload['grade']}")
         print(f"    Updated at: {payload['updated_at']} ({type(payload['updated_at'])})")
+        print(f"    Price: £{payload.get('price_min_gbp', 'N/A')}")
     
     # バリデーションのテスト
     validator = DataValidator()
-    for i, payload in enumerate(db_ready_payloads):
+    for i, payload in enumerate(payloads):
         is_valid, errors = validator.validate_payload(payload)
         print(f"  Payload {i+1} validation: {'PASS' if is_valid else 'FAIL'}")
         if errors:
