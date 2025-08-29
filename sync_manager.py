@@ -72,7 +72,7 @@ class SupabaseManager:
             clean_payload = self._prepare_payload(payload)
             
             response = requests.post(
-                f"{self.url}/rest/v1/system_cars",
+                f"{self.url}/rest/v1/cars",
                 headers=headers,
                 json=clean_payload,
                 timeout=30
