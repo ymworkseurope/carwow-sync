@@ -193,29 +193,15 @@ class CarwowScraper:
             url = f"{BASE_URL}/{maker}"
             resp = requests.get(url, headers=HEADERS, timeout=30)
             
-            # デバッグ: ステータスコード確認
             if resp.status_code != 200:
-                print(f"    Error: Got status code {resp.status_code} for {url}")
                 return models
             
             soup = BeautifulSoup(resp.text, 'lxml')
             
-            # デバッグ: ページタイトル確認
-            title = soup.find('title')
-            if title:
-                print(f"    Page title: {title.text[:50]}...")
-            
-            # 方法1: article.card-compactから取得
+            # article.card-compactから取得
             articles = soup.find_all('article', class_='card-compact')
-            print(f"    Found {len(articles)} article.card-compact elements")
             
             for article in articles:
-                # h3タグから車種名を取得
-                h3 = article.find('h3', class_='card-compact__title')
-                if h3:
-                    model_name = h3.get_text(strip=True)
-                    print(f"      Found model name: {model_name}")
-                
                 # リンクを探す
                 for link in article.find_all('a', href=True):
                     href = link['href']
@@ -232,16 +218,13 @@ class CarwowScraper:
                         if len(parts) >= 2 and parts[0] == maker:
                             model_slug = f"{parts[0]}/{parts[1]}"
                             if model_slug not in seen:
-                                print(f"      Added: {model_slug}")
                                 models.append(model_slug)
                                 seen.add(model_slug)
                                 break  # 同じarticle内の重複リンクを避ける
             
-            # 方法2: articleで見つからない場合、すべてのaタグから取得
+            # articleで見つからない場合、すべてのaタグから取得
             if not models:
-                print("    No models found in articles, checking all links...")
                 all_links = soup.find_all('a', href=True)
-                print(f"    Found {len(all_links)} total links")
                 
                 for link in all_links:
                     href = link['href']
@@ -255,14 +238,10 @@ class CarwowScraper:
                         if len(parts) >= 2 and parts[0] == maker:
                             model_slug = f"{parts[0]}/{parts[1]}"
                             if model_slug not in seen:
-                                print(f"      Added from link: {model_slug}")
                                 models.append(model_slug)
                                 seen.add(model_slug)
                                 
         except Exception as e:
-            print(f"    Exception in get_models_for_maker: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"    Error getting models for {maker}: {e}")
         
-        print(f"    Total models found: {len(models)}")
         return models
