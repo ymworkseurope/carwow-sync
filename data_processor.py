@@ -256,4 +256,118 @@ class DataProcessor:
         }
         
         # エンジン情報のパース
-        engine_text = grade
+        engine_text = grade_info.get('engine', '')
+        if engine_text:
+            spec_json['engine_details'] = self._parse_engine_details(engine_text)
+        
+        return spec_json
+    
+    def _clean_engine_info(self, engine_text: str) -> str:
+        """エンジン情報をクリーンアップ"""
+        if not engine_text or engine_text == '-':
+            return ''
+        
+        # 不要な文字を削除
+        engine_text = re.sub(r'\s+', ' ', engine_text)
+        engine_text = engine_text.strip()
+        
+        return engine_text
+    
+    def _parse_engine_details(self, engine_text: str) -> Dict:
+        """エンジン情報を詳細にパース"""
+        details = {}
+        
+        # パワー（馬力）
+        hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
+        if hp_match:
+            details['power_hp'] = int(hp_match.group(1))
+        
+        # パワー（kW）
+        kw_match = re.search(r'(\d+)\s*kW', engine_text)
+        if kw_match:
+            details['power_kw'] = int(kw_match.group(1))
+        
+        # トルク
+        torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
+        if torque_match:
+            details['torque'] = torque_match.group(0)
+        
+        # エンジンサイズ
+        size_match = re.search(r'(\d+\.?\d*)\s*(?:L|litre|liter)', engine_text, re.IGNORECASE)
+        if size_match:
+            details['engine_size'] = float(size_match.group(1))
+        
+        # シリンダー数
+        cyl_match = re.search(r'(\d+)\s*(?:cyl|cylinder)', engine_text, re.IGNORECASE)
+        if cyl_match:
+            details['cylinders'] = int(cyl_match.group(1))
+        
+        return details
+    
+    def _extract_number(self, value: Any) -> Optional[int]:
+        """文字列から数値を抽出"""
+        if value is None:
+            return None
+        
+        if isinstance(value, int):
+            return value
+        
+        if isinstance(value, str):
+            match = re.search(r'\d+', value)
+            if match:
+                return int(match.group(0))
+        
+        return None
+    
+    def _extract_power(self, raw_data: Dict) -> Optional[int]:
+        """パワー（馬力）を抽出"""
+        # グレード情報から探す
+        for grade in raw_data.get('grades', []):
+            engine = grade.get('engine', '')
+            if engine:
+                hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine, re.IGNORECASE)
+                if hp_match:
+                    return int(hp_match.group(1))
+                
+                # kWから変換
+                kw_match = re.search(r'(\d+)\s*kW', engine)
+                if kw_match:
+                    kw = int(kw_match.group(1))
+                    return int(kw * 1.341)  # kW to hp conversion
+        
+        return None
+    
+    def _detect_fuel_type(self, raw_data: Dict) -> str:
+        """燃料タイプを検出"""
+        text_to_check = ' '.join([
+            raw_data.get('overview_en', ''),
+            ' '.join(raw_data.get('body_types', [])),
+            ' '.join(grade.get('engine', '') for grade in raw_data.get('grades', []))
+        ]).lower()
+        
+        if 'electric' in text_to_check or 'ev' in text_to_check:
+            return 'Electric'
+        elif 'plug-in hybrid' in text_to_check or 'phev' in text_to_check:
+            return 'Plug-in Hybrid'
+        elif 'hybrid' in text_to_check:
+            return 'Hybrid'
+        elif 'diesel' in text_to_check:
+            return 'Diesel'
+        else:
+            return 'Petrol'  # デフォルト
+    
+    def _detect_drive_type(self, raw_data: Dict) -> str:
+        """駆動方式を検出"""
+        text_to_check = ' '.join([
+            raw_data.get('overview_en', ''),
+            str(raw_data.get('specifications', {}))
+        ]).lower()
+        
+        if 'awd' in text_to_check or 'all-wheel' in text_to_check:
+            return 'AWD'
+        elif '4wd' in text_to_check or 'four-wheel' in text_to_check:
+            return '4WD'
+        elif 'rwd' in text_to_check or 'rear-wheel' in text_to_check:
+            return 'RWD'
+        else:
+            return 'FWD'  # デフォルト（前輪駆動）
