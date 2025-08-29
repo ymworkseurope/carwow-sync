@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 実際のHTML構造に基づく実装
+carwow_scraper.py - シンプルで確実な実装
 """
 import re
 import json
@@ -154,12 +154,11 @@ class CarwowScraper:
                 # brands-list__group-item-title-name クラスからブランド名を取得
                 for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
                     brand_name = brand_div.get_text(strip=True).lower()
-                    # URLスラッグ形式に変換（例: "Land Rover" -> "land-rover"）
                     brand_slug = brand_name.replace(' ', '-')
                     if brand_slug and brand_slug not in makers:
                         makers.append(brand_slug)
                 
-                # 親要素のリンクからも取得（フォールバック）
+                # フォールバック: リンクから取得
                 if not makers:
                     for link in soup.find_all('a', href=True):
                         href = link['href']
@@ -191,48 +190,79 @@ class CarwowScraper:
         seen = set()
         
         try:
-            resp = requests.get(f"{BASE_URL}/{maker}", headers=HEADERS, timeout=30)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'lxml')
+            url = f"{BASE_URL}/{maker}"
+            resp = requests.get(url, headers=HEADERS, timeout=30)
+            
+            # デバッグ: ステータスコード確認
+            if resp.status_code != 200:
+                print(f"    Error: Got status code {resp.status_code} for {url}")
+                return models
+            
+            soup = BeautifulSoup(resp.text, 'lxml')
+            
+            # デバッグ: ページタイトル確認
+            title = soup.find('title')
+            if title:
+                print(f"    Page title: {title.text[:50]}...")
+            
+            # 方法1: article.card-compactから取得
+            articles = soup.find_all('article', class_='card-compact')
+            print(f"    Found {len(articles)} article.card-compact elements")
+            
+            for article in articles:
+                # h3タグから車種名を取得
+                h3 = article.find('h3', class_='card-compact__title')
+                if h3:
+                    model_name = h3.get_text(strip=True)
+                    print(f"      Found model name: {model_name}")
                 
-                # __NEXT_DATA__から取得を試みる
-                script = soup.find('script', id='__NEXT_DATA__')
-                if script and script.string:
-                    try:
-                        data = json.loads(script.string)
-                        # productCardListから取得
-                        product_list = (data.get('props', {})
-                                      .get('pageProps', {})
-                                      .get('collection', {})
-                                      .get('productCardList', []))
-                        
-                        for product in product_list:
-                            if url := product.get('url'):
-                                # URLから/maker/model部分を抽出
-                                if url.startswith(f'/{maker}/'):
-                                    parts = url.strip('/').split('/')
-                                    if len(parts) >= 2:
-                                        model_slug = f"{parts[0]}/{parts[1]}"
-                                        if model_slug not in seen:
-                                            models.append(model_slug)
-                                            seen.add(model_slug)
-                    except:
-                        pass
-                
-                # HTMLのリンクからも取得（フォールバック）
-                for link in soup.find_all('a', href=True):
+                # リンクを探す
+                for link in article.find_all('a', href=True):
                     href = link['href']
-                    # /maker/model形式のURLのみ
-                    if href.startswith(f'/{maker}/'):
-                        parts = href.strip('/').split('/')
-                        # 正確に2階層のみ（追加パスを除外）
-                        if len(parts) == 2 and parts[0] == maker:
+                    # URLからモデルを抽出
+                    if f'/{maker}/' in href:
+                        # URLパースしてモデル部分を取得
+                        if 'carwow.co.uk' in href:
+                            # https://www.carwow.co.uk/abarth/500e から abarth/500e を抽出
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            # 相対URL
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
                             model_slug = f"{parts[0]}/{parts[1]}"
                             if model_slug not in seen:
+                                print(f"      Added: {model_slug}")
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                break  # 同じarticle内の重複リンクを避ける
+            
+            # 方法2: articleで見つからない場合、すべてのaタグから取得
+            if not models:
+                print("    No models found in articles, checking all links...")
+                all_links = soup.find_all('a', href=True)
+                print(f"    Found {len(all_links)} total links")
+                
+                for link in all_links:
+                    href = link['href']
+                    # review リンクを探す
+                    if f'/{maker}/' in href and 'review' in link.get_text('').lower():
+                        if 'carwow.co.uk' in href:
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                print(f"      Added from link: {model_slug}")
                                 models.append(model_slug)
                                 seen.add(model_slug)
                                 
         except Exception as e:
-            print(f"    Error getting models for {maker}: {e}")
+            print(f"    Exception in get_models_for_maker: {e}")
+            import traceback
+            traceback.print_exc()
         
+        print(f"    Total models found: {len(models)}")
         return models
