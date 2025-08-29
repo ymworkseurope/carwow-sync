@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 改良版
-実行管理とデータベース同期モジュール
+sync_manager.py - 改良版（Google Sheets同期機能付き）
+実行管理とデータベース・スプレッドシート同期モジュール
 """
 import os
 import sys
@@ -10,8 +10,11 @@ import time
 import argparse
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+from pathlib import Path
 
 import requests
+import gspread
+from google.oauth2.service_account import Credentials
 
 # 他のモジュールをインポート
 try:
@@ -24,6 +27,21 @@ except ImportError as e:
 # ======================== Configuration ========================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GS_CREDS_JSON = os.getenv("GS_CREDS_JSON")
+GS_SHEET_ID = os.getenv("GS_SHEET_ID")
+
+# Google Sheets設定
+SHEET_NAME = "system_cars"
+SHEET_HEADERS = [
+    "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
+    "grade", "engine", "body_type", "body_type_ja", "fuel", "fuel_ja",
+    "transmission", "transmission_ja", "price_min_gbp", "price_max_gbp", 
+    "price_used_gbp", "price_min_jpy", "price_max_jpy", "price_used_jpy",
+    "overview_en", "overview_ja", "doors", "seats", "power_bhp",
+    "drive_type", "drive_type_ja", "dimensions_mm", "dimensions_ja",
+    "colors", "colors_ja", "media_urls", "catalog_url",
+    "full_model_ja", "updated_at", "spec_json"
+]
 
 # ======================== Database Manager ========================
 class SupabaseManager:
@@ -54,7 +72,7 @@ class SupabaseManager:
             clean_payload = self._prepare_payload(payload)
             
             response = requests.post(
-                f"{self.url}/rest/v1/cars",  # テーブル名を適切に設定
+                f"{self.url}/rest/v1/system_cars",
                 headers=headers,
                 json=clean_payload,
                 timeout=30
@@ -75,8 +93,8 @@ class SupabaseManager:
         clean = {}
         
         for key, value in payload.items():
-            # Noneの値は除外
-            if value is None:
+            # Noneまたは'-'の値は除外
+            if value is None or value == '-':
                 continue
             
             # 配列型のフィールド
@@ -89,7 +107,12 @@ class SupabaseManager:
             # JSONB型のフィールド
             elif key == 'spec_json':
                 if isinstance(value, dict):
-                    clean[key] = value
+                    # spec_json内の'-'もNoneに変換
+                    clean_spec = {}
+                    for k, v in value.items():
+                        if v != '-':
+                            clean_spec[k] = v
+                    clean[key] = clean_spec
                 else:
                     clean[key] = {}
             
@@ -110,6 +133,198 @@ class SupabaseManager:
         
         return clean
 
+# ======================== Google Sheets Manager ========================
+class GoogleSheetsManager:
+    """Google Sheets管理"""
+    
+    def __init__(self):
+        self.worksheet = None
+        self.enabled = False
+        self.headers = SHEET_HEADERS
+        self._initialize()
+    
+    def _initialize(self):
+        """Google Sheets接続を初期化"""
+        if not (GS_CREDS_JSON and GS_SHEET_ID):
+            print("Warning: Google Sheets credentials not configured")
+            return
+        
+        try:
+            # 認証情報の処理
+            if GS_CREDS_JSON.startswith('{'):
+                # JSON文字列の場合
+                creds_data = json.loads(GS_CREDS_JSON)
+            else:
+                # ファイルパスの場合
+                with open(GS_CREDS_JSON, 'r') as f:
+                    creds_data = json.load(f)
+            
+            # 一時ファイルに保存
+            creds_path = Path("temp_creds.json")
+            creds_path.write_text(json.dumps(creds_data))
+            
+            # 認証
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            
+            credentials = Credentials.from_service_account_file(
+                str(creds_path), 
+                scopes=scopes
+            )
+            
+            # 一時ファイルを削除
+            creds_path.unlink()
+            
+            # スプレッドシート接続
+            client = gspread.authorize(credentials)
+            spreadsheet = client.open_by_key(GS_SHEET_ID)
+            
+            # ワークシート取得または作成
+            try:
+                self.worksheet = spreadsheet.worksheet(SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                self.worksheet = spreadsheet.add_worksheet(
+                    title=SHEET_NAME,
+                    rows=10000,
+                    cols=len(SHEET_HEADERS)
+                )
+            
+            # ヘッダー設定
+            self._setup_headers()
+            
+            self.enabled = True
+            print(f"Connected to Google Sheets: {SHEET_NAME}")
+            
+        except Exception as e:
+            print(f"Google Sheets initialization error: {e}")
+            self.enabled = False
+    
+    def _setup_headers(self):
+        """ヘッダー行を設定"""
+        try:
+            current_headers = self.worksheet.row_values(1)
+            if not current_headers or current_headers != self.headers:
+                self.worksheet.update([self.headers], "A1")
+        except Exception as e:
+            print(f"Error setting headers: {e}")
+    
+    def upsert(self, payload: Dict) -> bool:
+        """データをUPSERT"""
+        if not self.enabled:
+            return False
+        
+        try:
+            # ユニークキーでの検索
+            slug = payload.get('slug')
+            grade = payload.get('grade', 'Standard')
+            
+            if not slug:
+                return False
+            
+            # 既存の行を検索
+            try:
+                all_values = self.worksheet.get_all_values()
+                row_num = None
+                
+                for i, row in enumerate(all_values[1:], start=2):
+                    if len(row) > 2:  # slug列とgrade列が存在
+                        if row[1] == slug and row[6] == grade:  # slug=2列目, grade=7列目
+                            row_num = i
+                            break
+                
+                if not row_num:
+                    row_num = len(all_values) + 1
+                    
+            except Exception:
+                row_num = self.worksheet.row_count + 1
+            
+            # 行データの準備
+            row_data = self._prepare_row_data(payload)
+            
+            # データ更新
+            self.worksheet.update(
+                [row_data], 
+                f"A{row_num}",
+                value_input_option='RAW'
+            )
+            
+            return True
+            
+        except Exception as e:
+            print(f"Sheets upsert error: {e}")
+            return False
+    
+    def _prepare_row_data(self, payload: Dict) -> List[str]:
+        """シート用の行データを準備"""
+        row_data = []
+        
+        for header in self.headers:
+            value = payload.get(header)
+            
+            # 値の変換
+            if value is None or value == '-':
+                row_data.append('')
+            elif isinstance(value, list):
+                # 配列は文字列結合
+                row_data.append(', '.join(str(v) for v in value))
+            elif isinstance(value, dict):
+                # 辞書はJSON文字列
+                row_data.append(json.dumps(value, ensure_ascii=False))
+            elif isinstance(value, datetime):
+                # 日時はISO形式
+                row_data.append(value.isoformat())
+            else:
+                row_data.append(str(value))
+        
+        return row_data
+    
+    def batch_upsert(self, payloads: List[Dict]) -> int:
+        """複数データを一括更新"""
+        if not self.enabled:
+            return 0
+        
+        success_count = 0
+        
+        # バッチ処理のためにデータを準備
+        all_data = []
+        for payload in payloads:
+            row_data = self._prepare_row_data(payload)
+            all_data.append(row_data)
+        
+        try:
+            # 既存データを取得
+            existing_data = self.worksheet.get_all_values()
+            
+            # 新規データを追加
+            if all_data:
+                start_row = len(existing_data) + 1
+                end_row = start_row + len(all_data) - 1
+                
+                # 範囲を計算
+                col_letter = chr(64 + len(self.headers))  # A-Z変換
+                range_name = f"A{start_row}:{col_letter}{end_row}"
+                
+                # 一括更新
+                self.worksheet.update(
+                    all_data,
+                    range_name,
+                    value_input_option='RAW'
+                )
+                
+                success_count = len(all_data)
+                
+        except Exception as e:
+            print(f"Batch upsert error: {e}")
+            # エラー時は個別処理にフォールバック
+            for payload in payloads:
+                if self.upsert(payload):
+                    success_count += 1
+                time.sleep(0.5)
+        
+        return success_count
+
 # ======================== Sync Manager ========================
 class SyncManager:
     """メイン同期管理クラス"""
@@ -118,11 +333,13 @@ class SyncManager:
         self.scraper = CarwowScraper()
         self.processor = DataProcessor()
         self.supabase = SupabaseManager()
+        self.sheets = GoogleSheetsManager()
         
         self.stats = {
             'total': 0,
             'success': 0,
             'failed': 0,
+            'records_saved': 0,
             'errors': []
         }
     
@@ -131,12 +348,15 @@ class SyncManager:
         print("=" * 60)
         print("Starting Carwow Data Sync")
         print(f"Time: {datetime.now().isoformat()}")
+        print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
+        print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
         print("=" * 60)
         
         if makers is None:
             makers = self.scraper.get_all_makers()
             # 不要なメーカーを除外
-            makers = [m for m in makers if m not in ['editorial', 'leasing', 'news', 'reviews']]
+            exclude = ['editorial', 'leasing', 'news', 'reviews', 'deals', 'advice']
+            makers = [m for m in makers if m not in exclude]
         
         print(f"Processing {len(makers)} makers")
         
@@ -150,11 +370,13 @@ class SyncManager:
                 for model_idx, model_slug in enumerate(models):
                     if limit and self.stats['total'] >= limit:
                         print("\nReached limit, stopping...")
+                        self._print_statistics()
                         return
                     
                     self.stats['total'] += 1
                     self._process_vehicle(model_slug, model_idx + 1, len(models))
                     
+                    # レート制限対策
                     time.sleep(0.5)
                     
             except Exception as e:
@@ -166,6 +388,9 @@ class SyncManager:
     def sync_specific(self, slugs: List[str]):
         """特定の車両のみ同期"""
         print(f"Syncing {len(slugs)} specific vehicles")
+        print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
+        print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
+        print("=" * 60)
         
         for idx, slug in enumerate(slugs):
             self.stats['total'] += 1
@@ -188,8 +413,12 @@ class SyncManager:
             # 各レコードを保存
             saved_count = 0
             for record in records:
-                if self.supabase.upsert(record):
+                supabase_success = self.supabase.upsert(record)
+                sheets_success = self.sheets.upsert(record)
+                
+                if supabase_success or sheets_success:
                     saved_count += 1
+                    self.stats['records_saved'] += 1
             
             if saved_count > 0:
                 print(f"OK ({saved_count}/{len(records)} records)")
@@ -199,33 +428,50 @@ class SyncManager:
                 self.stats['failed'] += 1
                 
         except Exception as e:
-            print(f"ERROR: {str(e)[:50]}")
+            error_msg = str(e)
+            if "404" in error_msg:
+                print("NOT FOUND")
+            else:
+                print(f"ERROR: {error_msg[:50]}")
             self.stats['failed'] += 1
-            self.stats['errors'].append(f"{slug}: {str(e)}")
+            self.stats['errors'].append(f"{slug}: {error_msg}")
     
     def _print_statistics(self):
         """統計情報を表示"""
         print("\n" + "=" * 60)
         print("Sync Statistics")
         print("=" * 60)
-        print(f"Total processed: {self.stats['total']}")
-        print(f"Success: {self.stats['success']}")
+        print(f"Total vehicles processed: {self.stats['total']}")
+        print(f"Successful: {self.stats['success']}")
         print(f"Failed: {self.stats['failed']}")
+        print(f"Total records saved: {self.stats['records_saved']}")
         
         if self.stats['errors']:
             print(f"\nErrors (showing first 10):")
             for error in self.stats['errors'][:10]:
-                print(f"  - {error}")
+                print(f"  - {error[:100]}")
         
         if self.stats['total'] > 0:
             success_rate = (self.stats['success'] / self.stats['total']) * 100
             print(f"\nSuccess rate: {success_rate:.1f}%")
+            
+            if self.stats['success'] > 0:
+                avg_records = self.stats['records_saved'] / self.stats['success']
+                print(f"Average records per vehicle: {avg_records:.1f}")
 
 # ======================== CLI Interface ========================
 def main():
     """メインエントリポイント"""
     parser = argparse.ArgumentParser(
-        description="Carwow Data Sync Manager"
+        description="Carwow Data Sync Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python sync_manager.py --test                    # Test mode (5 vehicles)
+  python sync_manager.py --makers audi bmw         # Specific makers
+  python sync_manager.py --models audi/a4 bmw/x5   # Specific models
+  python sync_manager.py --limit 10                # Limit to 10 vehicles
+        """
     )
     
     parser.add_argument(
@@ -252,13 +498,40 @@ def main():
         help='Run in test mode (process only 5 vehicles)'
     )
     
+    parser.add_argument(
+        '--no-supabase',
+        action='store_true',
+        help='Disable Supabase sync'
+    )
+    
+    parser.add_argument(
+        '--no-sheets',
+        action='store_true',
+        help='Disable Google Sheets sync'
+    )
+    
     args = parser.parse_args()
+    
+    # 環境変数の上書き
+    if args.no_supabase:
+        os.environ['SUPABASE_URL'] = ''
+        os.environ['SUPABASE_KEY'] = ''
+    
+    if args.no_sheets:
+        os.environ['GS_CREDS_JSON'] = ''
+        os.environ['GS_SHEET_ID'] = ''
     
     if args.test:
         args.limit = 5
         print("Running in TEST mode (limit=5)")
     
     manager = SyncManager()
+    
+    # 少なくとも1つの同期先が有効かチェック
+    if not manager.supabase.enabled and not manager.sheets.enabled:
+        print("Error: No sync destination configured.")
+        print("Please set either Supabase or Google Sheets credentials.")
+        sys.exit(1)
     
     try:
         if args.models:
@@ -272,6 +545,8 @@ def main():
     
     except Exception as e:
         print(f"\n\nFatal error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
