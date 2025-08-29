@@ -70,11 +70,11 @@ class CarwowScraper:
             if 'carwow' in src or 'prismic' in src:
                 media_urls.append(src)
         
-        # Specificationsページ
+        # Specificationsページから詳細データ取得
         grades = []
         specs = {}
-        colors = []
-        body_types = []
+        dimensions_mm = None
+        engine_info = None
         
         specs_url = f"{BASE_URL}/{slug}/specifications"
         try:
@@ -111,22 +111,172 @@ class CarwowScraper:
                     elif 'Manual' in specs_text:
                         specs['transmission'] = 'Manual'
                 
-                # ボディタイプ
-                full_text = text.lower() + specs_text.lower()
-                if 'electric' in full_text:
-                    body_types.append('Electric')
-                if 'hatchback' in full_text:
-                    body_types.append('Hatchback')
-                if 'suv' in full_text:
-                    body_types.append('SUV')
-                if 'convertible' in full_text or 'cabrio' in full_text:
-                    body_types.append('Convertible')
+                # 寸法データをSVG内のtspanから取得
+                dimensions = []
+                for tspan in specs_soup.find_all('tspan'):
+                    text = tspan.get_text(strip=True)
+                    if 'mm' in text and re.search(r'\d+,?\d*\s*mm', text):
+                        dimensions.append(text)
+                
+                if len(dimensions) >= 3:
+                    dimensions_mm = f"{dimensions[0]}, {dimensions[1]}, {dimensions[2]}"
+                
+                # エンジン情報を取得
+                for div in specs_soup.find_all('div', class_='specification-breakdown__title'):
+                    engine_text = div.get_text(strip=True)
+                    if 'kW' in engine_text or 'hp' in engine_text or 'bhp' in engine_text:
+                        engine_info = engine_text
+                        break
                 
         except:
             pass
         
+        # カラー情報を取得
+        colors = []
+        colors_url = f"{BASE_URL}/{slug}/colours"
+        try:
+            colors_resp = requests.get(colors_url, headers=HEADERS, timeout=30, allow_redirects=False)
+            
+            if colors_resp.status_code == 200:
+                colors_soup = BeautifulSoup(colors_resp.text, 'lxml')
+                
+                # model-hub__colour-details-titleクラスから色名を取得
+                for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
+                    color_text = h4.get_text(strip=True)
+                    # 価格部分を除去
+                    color_name = re.sub(r'(Free|£[\d,]+).*
+    
+    def get_all_makers(self) -> List[str]:
+        """brandsページからメーカー一覧を取得"""
+        makers = []
+        
+        try:
+            resp = requests.get(f"{BASE_URL}/brands", headers=HEADERS, timeout=30)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                
+                # brands-list__group-item-title-name クラスからブランド名を取得
+                for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
+                    brand_name = brand_div.get_text(strip=True).lower()
+                    brand_slug = brand_name.replace(' ', '-')
+                    if brand_slug and brand_slug not in makers:
+                        makers.append(brand_slug)
+                
+                # フォールバック: リンクから取得
+                if not makers:
+                    for link in soup.find_all('a', href=True):
+                        href = link['href']
+                        if href.startswith('/') and href.count('/') == 1:
+                            maker = href[1:]
+                            if maker and not any(x in maker for x in ['brands', 'news', 'reviews']):
+                                if maker not in makers:
+                                    makers.append(maker)
+        except:
+            pass
+        
+        # 取得できなかった場合は既知のリスト
+        if not makers:
+            makers = [
+                'abarth', 'alfa-romeo', 'alpine', 'aston-martin', 'audi',
+                'bentley', 'bmw', 'byd', 'citroen', 'cupra', 'dacia', 'ds',
+                'fiat', 'ford', 'genesis', 'honda', 'hyundai', 'jaguar',
+                'jeep', 'kia', 'land-rover', 'lexus', 'lotus', 'mazda',
+                'mercedes-benz', 'mg', 'mini', 'nissan', 'peugeot', 'polestar',
+                'porsche', 'renault', 'seat', 'skoda', 'smart', 'subaru',
+                'suzuki', 'tesla', 'toyota', 'vauxhall', 'volkswagen', 'volvo'
+            ]
+        
+        return sorted(makers)
+    
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """メーカーページからモデル一覧を取得"""
+        models = []
+        seen = set()
+        
+        try:
+            url = f"{BASE_URL}/{maker}"
+            resp = requests.get(url, headers=HEADERS, timeout=30)
+            
+            if resp.status_code != 200:
+                return models
+            
+            soup = BeautifulSoup(resp.text, 'lxml')
+            
+            # article.card-compactから取得
+            articles = soup.find_all('article', class_='card-compact')
+            
+            for article in articles:
+                # リンクを探す
+                for link in article.find_all('a', href=True):
+                    href = link['href']
+                    # URLからモデルを抽出
+                    if f'/{maker}/' in href:
+                        # URLパースしてモデル部分を取得
+                        if 'carwow.co.uk' in href:
+                            # https://www.carwow.co.uk/abarth/500e から abarth/500e を抽出
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            # 相対URL
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                break  # 同じarticle内の重複リンクを避ける
+            
+            # articleで見つからない場合、すべてのaタグから取得
+            if not models:
+                all_links = soup.find_all('a', href=True)
+                
+                for link in all_links:
+                    href = link['href']
+                    # review リンクを探す
+                    if f'/{maker}/' in href and 'review' in link.get_text('').lower():
+                        if 'carwow.co.uk' in href:
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                
+        except Exception as e:
+            print(f"    Error getting models for {maker}: {e}")
+        
+        return models, '', color_text).strip()
+                    if color_name and color_name not in colors:
+                        colors.append(color_name)
+        except:
+            pass
+        
+        # ボディタイプ
+        body_types = []
+        full_text = text.lower()
+        if 'electric' in full_text:
+            body_types.append('Electric')
+        if 'hatchback' in full_text:
+            body_types.append('Hatchback')
+        if 'suv' in full_text:
+            body_types.append('SUV')
+        if 'convertible' in full_text or 'cabrio' in full_text:
+            body_types.append('Convertible')
+        
+        # グレードにエンジン情報を追加
+        if engine_info and grades:
+            for grade in grades:
+                grade['engine'] = engine_info
+        
         if not grades:
-            grades = [{'grade': '-', 'engine': '-', 'price_min_gbp': prices.get('price_min_gbp')}]
+            grades = [{'grade': '-', 'engine': engine_info or '-', 'price_min_gbp': prices.get('price_min_gbp')}]
+        
+        # dimensions_mmをspecsに追加
+        if dimensions_mm:
+            specs['dimensions_mm'] = dimensions_mm
         
         return {
             'slug': slug,
