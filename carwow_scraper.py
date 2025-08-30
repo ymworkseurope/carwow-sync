@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 最終完全版
-正確な要素から情報を取得（重複排除・メディア取得改善）
+carwow_scraper.py - 完全修正版
+正確な要素から情報を取得
 """
 import re
 import json
@@ -126,7 +126,7 @@ class CarwowScraper:
                 max_price_text = price_wraps[1].get_text(strip=True)
                 max_price_match = re.search(r'£([\d,]+)', max_price_text)
                 if max_price_match:
-                    prices['price_max_gbp'] = int(max_price_match.group(1).replace(',', ''))
+                    prices['price_max_gbp'] = int(max_price_match.group(2).replace(',', ''))
         
         # Used価格
         summary_items = soup.find_all('div', class_='summary-list__item')
@@ -543,7 +543,7 @@ class CarwowScraper:
         
         return sorted(makers)
     
-        def get_models_for_maker(self, maker: str) -> List[str]:
+    def get_models_for_maker(self, maker: str) -> List[str]:
         """メーカーページからモデル一覧を取得"""
         models = []
         seen = set()
