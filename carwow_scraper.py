@@ -126,7 +126,7 @@ class CarwowScraper:
                 max_price_text = price_wraps[1].get_text(strip=True)
                 max_price_match = re.search(r'£([\d,]+)', max_price_text)
                 if max_price_match:
-                    prices['price_max_gbp'] = int(max_price_match.group(2).replace(',', ''))
+                    prices['price_max_gbp'] = int(max_price_match.group(1).replace(',', ''))
         
         # Used価格
         summary_items = soup.find_all('div', class_='summary-list__item')
