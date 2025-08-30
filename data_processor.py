@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-data_processor.py - データ処理モジュール
-スクレイピングデータを処理して保存用フォーマットに変換
+data_processor.py - データ処理モジュール（改良版）
+エンジン単位でレコードを生成
 """
 import re
 import json
@@ -12,12 +12,12 @@ class DataProcessor:
     """データ処理クラス"""
     
     def __init__(self):
-        self.gbp_to_jpy = 185  # 為替レート（更新可能）
+        self.gbp_to_jpy = 185  # 為替レート
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
         車両データを処理してデータベース用レコードに変換
-        グレードごとに別レコードとして返す
+        エンジン単位で別レコードとして返す
         """
         if not raw_data:
             return []
@@ -25,34 +25,59 @@ class DataProcessor:
         records = []
         base_data = self._extract_base_data(raw_data)
         
-        # グレードごとにレコードを作成
-        grades = raw_data.get('grades', [])
-        if not grades:
-            grades = [{'grade': 'Standard', 'engine': '-', 'price_min_gbp': None}]
+        # grades_enginesから各エンジン単位でレコードを作成
+        grades_engines = raw_data.get('grades_engines', [])
         
-        for grade_info in grades:
+        if not grades_engines:
+            # データがない場合はデフォルトレコードを作成
+            grades_engines = [{
+                'grade': 'Standard',
+                'engine': 'N/A',
+                'price_min_gbp': None,
+                'fuel': 'N/A',
+                'transmission': 'N/A',
+                'drive_type': 'N/A',
+                'power_bhp': None
+            }]
+        
+        for grade_engine in grades_engines:
             record = base_data.copy()
             
-            # グレード情報
-            record['grade'] = grade_info.get('grade', 'Standard')
-            record['engine'] = self._clean_engine_info(grade_info.get('engine', ''))
+            # グレード・エンジン情報
+            record['grade'] = grade_engine.get('grade', 'Standard')
+            record['engine'] = grade_engine.get('engine', 'N/A')
+            
+            # 各種仕様
+            record['fuel'] = grade_engine.get('fuel', 'N/A')
+            record['transmission'] = grade_engine.get('transmission', 'N/A')
+            record['drive_type'] = grade_engine.get('drive_type', 'N/A')
+            record['power_bhp'] = grade_engine.get('power_bhp')
             
             # グレード別価格
-            if grade_info.get('price_min_gbp'):
-                record['price_min_gbp'] = grade_info['price_min_gbp']
-                record['price_min_jpy'] = int(grade_info['price_min_gbp'] * self.gbp_to_jpy)
+            if grade_engine.get('price_min_gbp'):
+                record['price_min_gbp'] = grade_engine['price_min_gbp']
+                record['price_min_jpy'] = int(grade_engine['price_min_gbp'] * self.gbp_to_jpy)
             
-            # 日本語変換
+            # 日本語フィールドを追加
             record = self._add_japanese_fields(record)
             
+            # full_model_jaを生成（make_ja + model_ja + grade + engine）
+            parts = [record['make_ja'], record['model_ja']]
+            if record['grade'] and record['grade'] not in ['Standard', 'N/A']:
+                parts.append(record['grade'])
+            if record['engine'] and record['engine'] != 'N/A':
+                parts.append(record['engine'])
+            record['full_model_ja'] = ' '.join(parts)
+            
             # spec_jsonフィールドに詳細情報を格納
-            record['spec_json'] = self._create_spec_json(raw_data, grade_info)
+            record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
             
             # タイムスタンプ
             record['updated_at'] = datetime.now().isoformat()
             
-            # IDを生成（slug + grade のハッシュ）
-            record['id'] = abs(hash(f"{record['slug']}_{record['grade']}")) % (10**9)
+            # IDを生成（slug + grade + engine のハッシュ）
+            unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
+            record['id'] = abs(hash(unique_key)) % (10**9)
             
             records.append(record)
         
@@ -74,9 +99,8 @@ class DataProcessor:
             'catalog_url': raw_data.get('catalog_url', ''),
             
             # スペック
-            'doors': self._extract_number(specs.get('doors')),
-            'seats': self._extract_number(specs.get('seats')),
-            'transmission': specs.get('transmission', ''),
+            'doors': specs.get('doors'),
+            'seats': specs.get('seats'),
             'dimensions_mm': specs.get('dimensions_mm', ''),
             
             # 価格（基本）
@@ -92,11 +116,6 @@ class DataProcessor:
             base['price_max_jpy'] = int(base['price_max_gbp'] * self.gbp_to_jpy)
         if base['price_used_gbp']:
             base['price_used_jpy'] = int(base['price_used_gbp'] * self.gbp_to_jpy)
-        
-        # 燃料タイプとパワーを推定
-        base['fuel'] = self._detect_fuel_type(raw_data)
-        base['power_bhp'] = self._extract_power(raw_data)
-        base['drive_type'] = self._detect_drive_type(raw_data)
         
         return base
     
@@ -152,21 +171,17 @@ class DataProcessor:
         record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
         record['model_ja'] = record['model_en']  # モデル名は基本的にそのまま
         
-        # フルモデル名（日本語）
-        record['full_model_ja'] = f"{record['make_ja']} {record['model_ja']}"
-        if record.get('grade') and record['grade'] != 'Standard':
-            record['full_model_ja'] += f" {record['grade']}"
-        
         # ボディタイプの日本語変換
         body_type_ja_map = {
-            'Electric': '電気自動車',
-            'Hatchback': 'ハッチバック',
-            'SUV': 'SUV',
             'Convertible': 'コンバーチブル',
-            'Sedan': 'セダン',
-            'Coupe': 'クーペ',
+            'SUV': 'SUV',
+            'Hatchback': 'ハッチバック',
+            'Saloon': 'セダン',
             'Estate': 'ステーションワゴン',
-            'MPV': 'ミニバン'
+            'Coupe': 'クーペ',
+            'Sports Car': 'スポーツカー',
+            'People Carrier': 'ミニバン',
+            'Electric': '電気自動車'
         }
         
         record['body_type_ja'] = [
@@ -179,40 +194,58 @@ class DataProcessor:
             'Diesel': 'ディーゼル',
             'Electric': '電気',
             'Hybrid': 'ハイブリッド',
-            'Plug-in Hybrid': 'プラグインハイブリッド'
+            'Plug-in Hybrid': 'プラグインハイブリッド',
+            'N/A': '不明'
         }
-        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', ''), record.get('fuel', ''))
+        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', 'N/A'), record.get('fuel', ''))
         
         # トランスミッションの日本語変換
         trans_ja_map = {
             'Automatic': 'オートマチック',
             'Manual': 'マニュアル',
             'CVT': 'CVT',
-            'DCT': 'DCT'
+            'DCT': 'DCT',
+            'N/A': '不明'
         }
-        record['transmission_ja'] = trans_ja_map.get(
-            record.get('transmission', ''), 
-            record.get('transmission', '')
-        )
+        
+        # トランスミッションが文章形式の場合も処理
+        trans = record.get('transmission', '')
+        if 'Automatic' in trans:
+            record['transmission_ja'] = 'オートマチック'
+        elif 'Manual' in trans:
+            record['transmission_ja'] = 'マニュアル'
+        else:
+            record['transmission_ja'] = trans_ja_map.get(trans, trans)
         
         # 駆動方式の日本語変換
         drive_ja_map = {
-            'FWD': '前輪駆動',
-            'RWD': '後輪駆動',
-            'AWD': '全輪駆動',
-            '4WD': '4WD'
+            'Front-wheel drive': '前輪駆動',
+            'Rear-wheel drive': '後輪駆動',
+            'All-wheel drive': '全輪駆動',
+            'Four-wheel drive': '4WD',
+            'N/A': '不明'
         }
-        record['drive_type_ja'] = drive_ja_map.get(
-            record.get('drive_type', ''),
-            record.get('drive_type', '')
-        )
         
-        # カラーの日本語変換（基本的な色のみ）
+        # 駆動方式が文章形式の場合も処理
+        drive = record.get('drive_type', '')
+        if 'Front' in drive or 'front' in drive:
+            record['drive_type_ja'] = '前輪駆動'
+        elif 'Rear' in drive or 'rear' in drive:
+            record['drive_type_ja'] = '後輪駆動'
+        elif 'All' in drive or 'all' in drive:
+            record['drive_type_ja'] = '全輪駆動'
+        elif 'Four' in drive or '4' in drive:
+            record['drive_type_ja'] = '4WD'
+        else:
+            record['drive_type_ja'] = drive_ja_map.get(drive, drive)
+        
+        # カラーの日本語変換
         color_ja_map = {
             'White': 'ホワイト',
             'Black': 'ブラック',
             'Silver': 'シルバー',
             'Grey': 'グレー',
+            'Gray': 'グレー',
             'Red': 'レッド',
             'Blue': 'ブルー',
             'Green': 'グリーン',
@@ -236,138 +269,82 @@ class DataProcessor:
         
         # 寸法の日本語説明
         if record.get('dimensions_mm'):
-            record['dimensions_ja'] = f"全長×全幅×全高: {record['dimensions_mm']}"
+            record['dimensions_ja'] = f"寸法: {record['dimensions_mm']}"
         
-        # 概要の翻訳（簡易的）
+        # 概要の翻訳プレースホルダー
         if not record.get('overview_ja'):
             record['overview_ja'] = record.get('overview_en', '')
         
         return record
     
-    def _create_spec_json(self, raw_data: Dict, grade_info: Dict) -> Dict:
+    def _create_spec_json(self, raw_data: Dict, grade_engine: Dict) -> Dict:
         """詳細仕様のJSONを作成"""
         spec_json = {
             'raw_specifications': raw_data.get('specifications', {}),
-            'grade_details': grade_info,
+            'grade_engine_details': grade_engine,
             'body_types': raw_data.get('body_types', []),
             'available_colors': raw_data.get('colors', []),
             'media_count': len(raw_data.get('media_urls', [])),
             'scrape_date': datetime.now().isoformat()
         }
         
-        # エンジン情報のパース
-        engine_text = grade_info.get('engine', '')
-        if engine_text:
-            spec_json['engine_details'] = self._parse_engine_details(engine_text)
+        # エンジン情報の詳細パース
+        engine_text = grade_engine.get('engine', '')
+        if engine_text and engine_text != 'N/A':
+            spec_json['engine_parsed'] = self._parse_engine_details(engine_text)
+        
+        # 追加の仕様情報
+        specs = raw_data.get('specifications', {})
+        if specs:
+            spec_json['additional_specs'] = {
+                'boot_capacity_l': specs.get('boot_capacity_l'),
+                'wheelbase_m': specs.get('wheelbase_m'),
+                'turning_circle_m': specs.get('turning_circle_m')
+            }
         
         return spec_json
-    
-    def _clean_engine_info(self, engine_text: str) -> str:
-        """エンジン情報をクリーンアップ"""
-        if not engine_text or engine_text == '-':
-            return ''
-        
-        # 不要な文字を削除
-        engine_text = re.sub(r'\s+', ' ', engine_text)
-        engine_text = engine_text.strip()
-        
-        return engine_text
     
     def _parse_engine_details(self, engine_text: str) -> Dict:
         """エンジン情報を詳細にパース"""
         details = {}
         
-        # パワー（馬力）
+        # 電気自動車の場合（kW/kWh形式）
+        electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
+        if electric_match:
+            details['type'] = 'Electric'
+            details['power_kw'] = int(electric_match.group(1))
+            details['battery_kwh'] = float(electric_match.group(2))
+            details['power_hp'] = int(details['power_kw'] * 1.341)
+            return details
+        
+        # 内燃機関の場合
+        # エンジンサイズ
+        size_match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
+        if size_match:
+            details['engine_size_l'] = float(size_match.group(1))
+        
+        # パワー
         hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
         if hp_match:
             details['power_hp'] = int(hp_match.group(1))
         
-        # パワー（kW）
         kw_match = re.search(r'(\d+)\s*kW', engine_text)
         if kw_match:
             details['power_kw'] = int(kw_match.group(1))
+            if 'power_hp' not in details:
+                details['power_hp'] = int(details['power_kw'] * 1.341)
         
         # トルク
         torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
         if torque_match:
             details['torque'] = torque_match.group(0)
         
-        # エンジンサイズ
-        size_match = re.search(r'(\d+\.?\d*)\s*(?:L|litre|liter)', engine_text, re.IGNORECASE)
-        if size_match:
-            details['engine_size'] = float(size_match.group(1))
-        
-        # シリンダー数
-        cyl_match = re.search(r'(\d+)\s*(?:cyl|cylinder)', engine_text, re.IGNORECASE)
-        if cyl_match:
-            details['cylinders'] = int(cyl_match.group(1))
+        # 燃料タイプ
+        if 'petrol' in engine_text.lower():
+            details['type'] = 'Petrol'
+        elif 'diesel' in engine_text.lower():
+            details['type'] = 'Diesel'
+        elif 'hybrid' in engine_text.lower():
+            details['type'] = 'Hybrid'
         
         return details
-    
-    def _extract_number(self, value: Any) -> Optional[int]:
-        """文字列から数値を抽出"""
-        if value is None:
-            return None
-        
-        if isinstance(value, int):
-            return value
-        
-        if isinstance(value, str):
-            match = re.search(r'\d+', value)
-            if match:
-                return int(match.group(0))
-        
-        return None
-    
-    def _extract_power(self, raw_data: Dict) -> Optional[int]:
-        """パワー（馬力）を抽出"""
-        # グレード情報から探す
-        for grade in raw_data.get('grades', []):
-            engine = grade.get('engine', '')
-            if engine:
-                hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine, re.IGNORECASE)
-                if hp_match:
-                    return int(hp_match.group(1))
-                
-                # kWから変換
-                kw_match = re.search(r'(\d+)\s*kW', engine)
-                if kw_match:
-                    kw = int(kw_match.group(1))
-                    return int(kw * 1.341)  # kW to hp conversion
-        
-        return None
-    
-    def _detect_fuel_type(self, raw_data: Dict) -> str:
-        """燃料タイプを検出"""
-        text_to_check = ' '.join([
-            raw_data.get('overview_en', ''),
-            ' '.join(raw_data.get('body_types', [])),
-            ' '.join(grade.get('engine', '') for grade in raw_data.get('grades', []))
-        ]).lower()
-        
-        if 'electric' in text_to_check or 'ev' in text_to_check:
-            return 'Electric'
-        elif 'plug-in hybrid' in text_to_check or 'phev' in text_to_check:
-            return 'Plug-in Hybrid'
-        elif 'hybrid' in text_to_check:
-            return 'Hybrid'
-        elif 'diesel' in text_to_check:
-            return 'Diesel'
-        else:
-            return 'Petrol'  # デフォルト
-    
-    def _detect_drive_type(self, raw_data: Dict) -> str:
-        """駆動方式を検出"""
-        text_to_check = ' '.join([
-            raw_data.get('overview_en', ''),
-            str(raw_data.get('specifications', {}))
-        ]).lower()
-        
-        if 'awd' in text_to_check or 'all-wheel' in text_to_check:
-            return 'AWD'
-        elif '4wd' in text_to_check or 'four-wheel' in text_to_check:
-            return '4WD'
-        elif 'rwd' in text_to_check or 'rear-wheel' in text_to_check:
-            return 'RWD'
-        else:
-            return 'FWD'  # デフォルト（前輪駆動）
