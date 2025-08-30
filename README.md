@@ -1,46 +1,36 @@
-# Carwow Vehicle Data Sync System
-
-英国の自動車情報サイト [Carwow](https://www.carwow.co.uk) から車両データを自動収集し、Supabase と Google Sheets に同期するシステムです。
-
-## 📋 システム構成
-
-シンプルな3ファイル構成で、役割を明確に分離：
-
-```
-carwow_scraper.py    # データ取得専門（スクレイピング）
+Carwow Vehicle Data Sync System
+英国の自動車情報サイト Carwow から車両データを自動収集し、Supabase と Google Sheets に同期するシステム。
+システム構成
+carwow_scraper.py    # データ取得（スクレイピング）
 data_processor.py    # データ変換・翻訳処理
 sync_manager.py      # 実行管理・DB同期
-```
-
-## 🔧 セットアップ
-
-### 1. 環境変数の設定
-
-GitHub Secrets に以下の環境変数を設定：
-
-| 変数名 | 説明 | 例 |
-|--------|------|-----|
-| `SUPABASE_URL` | Supabase プロジェクトURL | `https://xxx.supabase.co` |
-| `SUPABASE_KEY` | Supabase API キー（anon key） | `eyJhbGci...` |
-| `DEEPL_KEY` | DeepL API 認証キー（Free版可） | `xxxxxxxx-xxxx-xxxx` |
-| `GS_CREDS_JSON` | Google サービスアカウント JSON（1行化） | `{"type":"service_account",...}` |
-| `GS_SHEET_ID` | Google スプレッドシートID | `1ABC...xyz` |
-
-### 2. データベース構造
-
-#### Supabase テーブル (cars)
-
-```sql
-CREATE TABLE cars (
-  id UUID PRIMARY KEY,
-  slug TEXT UNIQUE NOT NULL,
+セットアップ
+環境変数
+bashSUPABASE_URL=https://xxx.supabase.co
+SUPABASE_KEY=eyJhbGci...
+GS_CREDS_JSON={"type":"service_account",...}  # 1行化
+GS_SHEET_ID=1ABC...xyz
+データベース構造（Supabase）
+sqlCREATE TABLE cars (
+  id BIGINT PRIMARY KEY,
+  slug TEXT NOT NULL,
   make_en TEXT,
   model_en TEXT,
   make_ja TEXT,
   model_ja TEXT,
+  grade TEXT,
+  engine TEXT,
+  engine_price_gbp INTEGER,
+  engine_price_jpy INTEGER,
   body_type TEXT[],
   body_type_ja TEXT[],
   fuel TEXT,
+  fuel_ja TEXT,
+  transmission TEXT,
+  transmission_ja TEXT,
+  drive_type TEXT,
+  drive_type_ja TEXT,
+  power_bhp INTEGER,
   price_min_gbp INTEGER,
   price_max_gbp INTEGER,
   price_used_gbp INTEGER,
@@ -49,205 +39,98 @@ CREATE TABLE cars (
   price_used_jpy INTEGER,
   overview_en TEXT,
   overview_ja TEXT,
-  spec_json JSONB,
-  media_urls TEXT[],
-  catalog_url TEXT,
   doors INTEGER,
   seats INTEGER,
   dimensions_mm TEXT,
-  drive_type TEXT,
-  drive_type_ja TEXT,
-  grades TEXT[],
-  engines TEXT[],
+  dimensions_ja TEXT,
   colors TEXT[],
+  colors_ja TEXT[],
+  media_urls TEXT[],
+  catalog_url TEXT,
   full_model_ja TEXT,
+  spec_json JSONB,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-
-CREATE INDEX idx_cars_slug ON cars(slug);
-CREATE INDEX idx_cars_make ON cars(make_en);
-CREATE INDEX idx_cars_updated ON cars(updated_at);
-```
-
-#### Google Sheets 構造
-
-自動的に `system_cars` シートが作成され、以下のカラムが設定されます：
-
-| カラム名 | 型 | 説明 |
-|---------|-----|------|
-| id | TEXT | UUID v5 |
-| slug | TEXT | メーカー/モデル形式 |
-| make_en | TEXT | メーカー名（英語） |
-| model_en | TEXT | モデル名（英語） |
-| make_ja | TEXT | メーカー名（日本語） |
-| model_ja | TEXT | モデル名（日本語） |
-| body_type | JSON | ボディタイプ配列 |
-| body_type_ja | JSON | ボディタイプ（日本語） |
-| fuel | TEXT | 燃料タイプ |
-| price_min_gbp | NUMBER | 最低価格（GBP） |
-| price_max_gbp | NUMBER | 最高価格（GBP） |
-| price_used_gbp | NUMBER | 中古価格（GBP） |
-| price_min_jpy | NUMBER | 最低価格（JPY） |
-| price_max_jpy | NUMBER | 最高価格（JPY） |
-| price_used_jpy | NUMBER | 中古価格（JPY） |
-| overview_en | TEXT | 概要（英語） |
-| overview_ja | TEXT | 概要（日本語） |
-| spec_json | JSON | 詳細スペック |
-| media_urls | JSON | 画像URL配列 |
-| catalog_url | TEXT | カタログURL |
-| doors | NUMBER | ドア数 |
-| seats | NUMBER | シート数 |
-| dimensions_mm | TEXT | 寸法 |
-| drive_type | TEXT | 駆動方式 |
-| drive_type_ja | TEXT | 駆動方式（日本語） |
-| grades | JSON | グレード配列 |
-| engines | JSON | エンジン配列 |
-| colors | JSON | カラー配列 |
-| full_model_ja | TEXT | フルモデル名（日本語） |
-| updated_at | DATETIME | 更新日時 |
-
-## 🚀 実行方法
-
-### 自動実行
-- 毎日 JST AM 2:00 に自動実行（GitHub Actions）
-- すべてのメーカー・モデルを処理
-
-### 手動実行
-
-#### GitHub Actions から
-1. Actions タブを開く
-2. "Daily Carwow Sync" を選択
-3. "Run workflow" をクリック
-4. オプションを設定（任意）：
-   - `makers`: 特定メーカーのみ処理
-   - `limit`: 処理数制限
-   - `test_mode`: テストモード（5件のみ）
-
-#### コマンドラインから
-
-```bash
-# 全データ同期
+Google Sheets構造
+自動作成される system_cars シートのカラム：
+カラム型説明idBIGINTユニークIDslugTEXTメーカー/モデル形式make_en/jaTEXTメーカー名model_en/jaTEXTモデル名gradeTEXTグレードengineTEXTエンジンengine_price_gbp/jpyNUMBERエンジン別価格fuel/fuel_jaTEXT燃料タイプtransmission/transmission_jaTEXTトランスミッションdrive_type/drive_type_jaTEXT駆動方式power_bhpNUMBERパワーprice_*_gbp/jpyNUMBER価格情報body_type/body_type_jaJSONボディタイプcolors/colors_jaJSONカラーmedia_urlsJSON画像URL配列spec_jsonJSON詳細スペック
+実行方法
+コマンドライン
+bash# 全データ同期
 python sync_manager.py
 
-# テストモード（5件のみ）
+# テストモード（5件）
 python sync_manager.py --test
 
-# 特定メーカーのみ
+# 特定メーカー
 python sync_manager.py --makers audi bmw
 
-# 特定モデルのみ
+# 特定モデル
 python sync_manager.py --models audi/a4 bmw/x5
 
 # 処理数制限
 python sync_manager.py --limit 10
-```
 
-## 📊 データ取得フロー
+# Supabaseのみ
+python sync_manager.py --no-sheets
 
-```mermaid
-graph TD
-    A[Carwow サイト] --> B[carwow_scraper.py]
-    B --> C[生データ取得]
-    C --> D[data_processor.py]
-    D --> E[データ変換・翻訳]
-    E --> F[sync_manager.py]
-    F --> G[Supabase]
-    F --> H[Google Sheets]
-```
+# Sheetsのみ
+python sync_manager.py --no-supabase
+GitHub Actions
 
-## 🔍 スクレイピング詳細
+毎日 JST 02:00 自動実行
+手動実行: Actions → "Daily Carwow Sync" → Run workflow
 
-### 対象ページ
-- メーカー一覧: `/brands`
-- メーカーページ: `/{maker}`
-- モデルページ: `/{maker}/{model}`
-- スペックページ: `/{maker}/{model}/specifications`
-- カラーページ: `/{maker}/{model}/colours`
+データ構造の特徴
+エンジン単位レコード
+各車両のグレード×エンジンの組み合わせで別レコードを生成：
 
-### データ取得戦略
-1. **メーカー自動発見**: /brands ページとトップページから全メーカーを検出
-2. **モデル自動発見**: 各メーカーページから全モデルを検出
-3. **除外処理**: カテゴリページ、フィルタページ、カラーページを自動除外
-4. **ボディタイプ推定**: カテゴリページへの掲載状況から推定
+audi/a4 に 3グレード × 2エンジン = 6レコード
+重複排除: 同一グレード+エンジンは1レコードに統合
 
-### 取得データ
-- 基本情報（メーカー、モデル、概要）
-- 価格情報（新車・中古・価格帯）
-- スペック（ドア数、シート数、寸法、駆動方式）
-- メディア（最大40枚の画像URL）
-- バリエーション（カラー、グレード、エンジン）
+価格情報
 
-## ⚠️ トラブルシューティング
+price_min/max_gbp: 車種全体の価格帯
+engine_price_gbp: エンジン別個別価格
+自動GBP→JPY変換（レート185）
 
-### よくある問題
+日本語対応
 
-#### スプレッドシート更新エラー
-- サービスアカウントの権限を確認
-- スプレッドシートIDが正しいか確認
-- APIの有効化を確認（Sheets API, Drive API）
+メーカー名、燃料タイプ、駆動方式の自動翻訳
+full_model_ja: 日本語フルモデル名生成
 
-#### 価格が取得できない
-- Carwowのページ構造変更の可能性
-- `_extract_prices` メソッドのセレクタを更新
+メディア処理
 
-#### DeepL翻訳エラー
-- APIキーの有効性を確認
-- 月間制限（Free: 500,000文字）を確認
+最大10枚の高解像度画像URL取得
+thumbnail-carousel-vertical__img クラスから優先取得
+重複排除とURL最適化
 
-#### データ取得失敗
-- レート制限に達した可能性（待機時間を調整）
-- ネットワークエラー（リトライ回数を増やす）
+スクレイピング戦略
+対象ページ
 
-## 🤖 AI向け仕様説明
+/brands - メーカー一覧
+/{maker} - モデル一覧
+/{maker}/{model} - 基本情報
+/{maker}/{model}/specifications - 詳細スペック
+/{maker}/{model}/colours - カラー情報
 
-### アーキテクチャ概要
-本システムは3つのモジュールで構成される単純明快な設計：
+データ取得方法
 
-1. **carwow_scraper.py**: 純粋なデータ取得層。HTTPリクエスト、HTML解析、データ抽出のみを担当
-2. **data_processor.py**: ビジネスロジック層。データ変換、翻訳、バリデーションを担当
-3. **sync_manager.py**: アプリケーション層。実行制御、データ永続化を担当
+価格: deals-cta-list__rrp-price → summary-list__item → テキスト全体
+画像: thumbnail-carousel-vertical__img → その他imgタグ
+スペック: specifications ページ → メインページフォールバック
+グレード/エンジン: trim-article セクション別処理
 
-### 重要な設計判断
-- **関心の分離**: 各モジュールは単一責任を持つ
-- **エラー耐性**: 個別のエラーは全体を停止させない
-- **拡張性**: 新しいデータソースや保存先を容易に追加可能
-- **テスタビリティ**: 各モジュールは独立してテスト可能
+エラーハンドリング
 
-### データフロー
-```
-URL発見 → スクレイピング → 変換 → 検証 → 永続化
-```
+個別エラーは全体を止めない
+404/タイムアウトは自動スキップ
+フォールバック処理（specifications → main page）
+デフォルトレコード生成（データなし時）
 
-### 主要クラス
-- `CarwowScraper`: メインスクレイピングクラス
-- `DataProcessor`: データ変換クラス
-- `SyncManager`: 同期管理クラス
-- `SupabaseManager`: DB接続管理
-- `GoogleSheetsManager`: シート接続管理
+パフォーマンス
 
-### 処理の特徴
-- **自動メーカー発見**: ハードコーディングなしで全メーカーを検出
-- **自動モデル発見**: 各メーカーの全モデルを動的に検出
-- **賢い除外処理**: フィルタページや無関係なページを自動判定
-- **多段階価格取得**: 複数の場所から価格情報を取得・統合
-- **ボディタイプ推定**: カテゴリページへの掲載状況から推定
-
-### エラーハンドリング
-- HTTPエラー: 3回までリトライ
-- 解析エラー: スキップして続行
-- API制限: 自動待機とレート制限
-- 検証エラー: ログ記録してスキップ
-
-### パフォーマンス考慮
-- レート制限: 0.5-1.5秒のランダム待機
-- バッチ処理: 効率的な一括更新
-- タイムアウト: 適切なタイムアウト設定
-- メモリ管理: 大量データの逐次処理
-
-## 📝 ライセンス
-
-Private repository - All rights reserved
-
-## 👥 Contributors
-
-YM Works Europe
+0.5秒間隔でレート制限対策
+バッチ処理（Google Sheets）
+重複排除と最適化
+タイムアウト設定（30秒）
