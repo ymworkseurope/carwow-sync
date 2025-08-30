@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 改良版（Google Sheets同期機能付き）
+sync_manager.py - 完全版（新しいヘッダー対応）
 実行管理とデータベース・スプレッドシート同期モジュール
 """
 import os
@@ -30,11 +30,12 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GS_CREDS_JSON = os.getenv("GS_CREDS_JSON")
 GS_SHEET_ID = os.getenv("GS_SHEET_ID")
 
-# Google Sheets設定
+# Google Sheets設定（engine_price_gbp/jpyを追加）
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
-    "grade", "engine", "body_type", "body_type_ja", "fuel", "fuel_ja",
+    "grade", "engine", "engine_price_gbp", "engine_price_jpy",
+    "body_type", "body_type_ja", "fuel", "fuel_ja",
     "transmission", "transmission_ja", "price_min_gbp", "price_max_gbp", 
     "price_used_gbp", "price_min_jpy", "price_max_jpy", "price_used_jpy",
     "overview_en", "overview_ja", "doors", "seats", "power_bhp",
@@ -93,8 +94,8 @@ class SupabaseManager:
         clean = {}
         
         for key, value in payload.items():
-            # Noneまたは'-'の値は除外
-            if value is None or value == '-':
+            # None、'-'、'N/A'の値は除外
+            if value is None or value in ['-', 'N/A']:
                 continue
             
             # 配列型のフィールド
@@ -107,10 +108,9 @@ class SupabaseManager:
             # JSONB型のフィールド
             elif key == 'spec_json':
                 if isinstance(value, dict):
-                    # spec_json内の'-'もNoneに変換
                     clean_spec = {}
                     for k, v in value.items():
-                        if v != '-':
+                        if v not in ['-', 'N/A']:
                             clean_spec[k] = v
                     clean[key] = clean_spec
                 else:
@@ -118,7 +118,8 @@ class SupabaseManager:
             
             # 数値型のフィールド
             elif key in ['price_min_gbp', 'price_max_gbp', 'price_used_gbp',
-                        'price_min_jpy', 'price_max_jpy', 'price_used_jpy']:
+                        'price_min_jpy', 'price_max_jpy', 'price_used_jpy',
+                        'engine_price_gbp', 'engine_price_jpy']:
                 if value is not None:
                     clean[key] = float(value)
             
@@ -219,6 +220,7 @@ class GoogleSheetsManager:
             # ユニークキーでの検索
             slug = payload.get('slug')
             grade = payload.get('grade', 'Standard')
+            engine = payload.get('engine', 'N/A')
             
             if not slug:
                 return False
@@ -229,8 +231,8 @@ class GoogleSheetsManager:
                 row_num = None
                 
                 for i, row in enumerate(all_values[1:], start=2):
-                    if len(row) > 2:  # slug列とgrade列が存在
-                        if row[1] == slug and row[6] == grade:  # slug=2列目, grade=7列目
+                    if len(row) > 7:  # slug, grade, engine列が存在
+                        if row[1] == slug and row[6] == grade and row[7] == engine:
                             row_num = i
                             break
                 
@@ -264,7 +266,7 @@ class GoogleSheetsManager:
             value = payload.get(header)
             
             # 値の変換
-            if value is None or value == '-':
+            if value is None or value in ['-', 'N/A']:
                 row_data.append('')
             elif isinstance(value, list):
                 # 配列は文字列結合
@@ -302,8 +304,16 @@ class GoogleSheetsManager:
                 start_row = len(existing_data) + 1
                 end_row = start_row + len(all_data) - 1
                 
-                # 範囲を計算
-                col_letter = chr(64 + len(self.headers))  # A-Z変換
+                # 範囲を計算（列数が多いのでAA以降も対応）
+                num_cols = len(self.headers)
+                if num_cols <= 26:
+                    col_letter = chr(64 + num_cols)
+                else:
+                    # AA, AB, AC...の形式
+                    first_letter = chr(64 + ((num_cols - 1) // 26))
+                    second_letter = chr(65 + ((num_cols - 1) % 26))
+                    col_letter = first_letter + second_letter
+                
                 range_name = f"A{start_row}:{col_letter}{end_row}"
                 
                 # 一括更新
@@ -406,6 +416,11 @@ class SyncManager:
             
             # スクレイピング
             raw_data = self.scraper.scrape_vehicle(slug)
+            
+            if not raw_data:
+                print("NO DATA")
+                self.stats['failed'] += 1
+                return
             
             # データ処理（複数のレコードが返される）
             records = self.processor.process_vehicle_data(raw_data)
