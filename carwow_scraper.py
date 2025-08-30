@@ -543,7 +543,7 @@ class CarwowScraper:
         
         return sorted(makers)
     
-    def get_models_for_maker(self, maker: str) -> List[str]:
+        def get_models_for_maker(self, maker: str) -> List[str]:
         """メーカーページからモデル一覧を取得"""
         models = []
         seen = set()
@@ -573,22 +573,10 @@ class CarwowScraper:
                             if model_slug not in seen:
                                 models.append(model_slug)
                                 seen.add(model_slug)
-                                
-        except Exception as e:
-            print(f"    Error getting models for {maker}: {e}")
-        
-        return models
-                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
-                        
-                        if len(parts) >= 2 and parts[0] == maker:
-                            model_slug = f"{parts[0]}/{parts[1]}"
-                            if model_slug not in seen:
-                                models.append(model_slug)
-                                seen.add(model_slug)
                                 break
             
             if not models:
-                all_links = soup.find_all('a', href=True):
+                all_links = soup.find_all('a', href=True)
                 
                 for link in all_links:
                     href = link['href']
@@ -598,4 +586,16 @@ class CarwowScraper:
                         
                         if 'carwow.co.uk' in href:
                             parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
-                        else
+                        else:
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                
+        except Exception as e:
+            print(f"    Error getting models for {maker}: {e}")
+        
+        return models
