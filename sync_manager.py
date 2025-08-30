@@ -30,7 +30,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GS_CREDS_JSON = os.getenv("GS_CREDS_JSON")
 GS_SHEET_ID = os.getenv("GS_SHEET_ID")
 
-# Google Sheets設定（engine_price_gbp/jpyを追加）
+# Google Sheets設定（spec_json重複を削除）
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
