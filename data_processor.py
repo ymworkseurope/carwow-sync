@@ -53,7 +53,15 @@ class DataProcessor:
             record['drive_type'] = grade_engine.get('drive_type', 'N/A')
             record['power_bhp'] = grade_engine.get('power_bhp')
             
-            # グレード別価格
+            # エンジンごとの価格（新しい列）
+            if grade_engine.get('engine_price_gbp'):
+                record['engine_price_gbp'] = grade_engine['engine_price_gbp']
+                record['engine_price_jpy'] = int(grade_engine['engine_price_gbp'] * self.gbp_to_jpy)
+            else:
+                record['engine_price_gbp'] = None
+                record['engine_price_jpy'] = None
+            
+            # グレード別価格（フォールバック）
             if grade_engine.get('price_min_gbp'):
                 record['price_min_gbp'] = grade_engine['price_min_gbp']
                 record['price_min_jpy'] = int(grade_engine['price_min_gbp'] * self.gbp_to_jpy)
