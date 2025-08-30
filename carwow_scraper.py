@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 改良版
-正確なHTML要素から情報を取得
+carwow_scraper.py - 正確な要素指定版
+指定された要素から正確に情報を取得
 """
 import re
 import json
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 from bs4 import BeautifulSoup
 import requests
 
@@ -15,8 +15,12 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 class CarwowScraper:
     
+    def __init__(self):
+        # body_typeマッピング用のキャッシュ
+        self.body_type_cache = {}
+    
     def scrape_vehicle(self, slug: str) -> Optional[Dict]:
-        """車両データを取得（改良版）"""
+        """車両データを取得"""
         
         main_url = f"{BASE_URL}/{slug}"
         main_resp = requests.get(main_url, headers=HEADERS, timeout=30)
@@ -31,11 +35,11 @@ class CarwowScraper:
         # overview_enの取得（emタグから）
         overview_en = self._extract_overview(main_soup)
         
-        # 価格情報の取得
-        prices = self._extract_prices(main_soup)
+        # 価格情報の取得（指定要素から）
+        prices = self._extract_prices_from_elements(main_soup)
         
-        # メディアURLの取得（高解像度版）
-        media_urls = self._extract_media_urls(main_soup)
+        # メディアURLの取得（media-slider__imageクラスから）
+        media_urls = self._extract_media_urls_from_slider(main_soup)
         
         # Specificationsページから詳細データ取得
         specs_data = self._scrape_specifications(slug)
@@ -43,8 +47,9 @@ class CarwowScraper:
         # カラー情報の取得
         colors = self._scrape_colors(slug)
         
-        # ボディタイプの検出（car-chooserページから）
-        body_types = self._detect_body_types(make_en, model_en)
+        # ボディタイプの取得（car-chooserページから）
+        # 注: 現時点ではSeleniumが必要なため、暫定的な実装
+        body_types = self._get_body_types_for_model(make_en, model_en)
         
         return {
             'slug': slug,
@@ -62,7 +67,6 @@ class CarwowScraper:
     
     def _extract_make_model(self, slug: str, soup: BeautifulSoup) -> Tuple[str, str]:
         """メーカーとモデル名を抽出"""
-        # slugから基本的なメーカー名を取得
         make_slug = slug.split('/')[0]
         make_en = make_slug.replace('-', ' ').title()
         
@@ -80,10 +84,8 @@ class CarwowScraper:
         title = soup.find('title')
         if title:
             title_text = title.text
-            # "Abarth 500e Convertible Review" のようなタイトルからモデル名を抽出
             if 'Review' in title_text:
                 model_part = title_text.split('Review')[0].strip()
-                # メーカー名を除去
                 model_en = model_part.replace(make_en, '').strip()
             elif '|' in title_text:
                 model_part = title_text.split('|')[0].strip()
@@ -93,11 +95,9 @@ class CarwowScraper:
     
     def _extract_overview(self, soup: BeautifulSoup) -> str:
         """overview_enをemタグから取得"""
-        # emタグを探す（最初の長い説明文）
         em_tag = soup.find('em')
         if em_tag:
             text = em_tag.get_text(strip=True)
-            # 長さチェック（短すぎる場合は説明文ではない可能性）
             if len(text) > 50:
                 return text
         
@@ -108,68 +108,77 @@ class CarwowScraper:
         
         return ''
     
-    def _extract_prices(self, soup: BeautifulSoup) -> Dict:
-        """価格情報を抽出"""
+    def _extract_prices_from_elements(self, soup: BeautifulSoup) -> Dict:
+        """指定された要素から価格情報を抽出"""
         prices = {}
-        text = soup.get_text()
         
-        # Cash価格
-        cash_match = re.search(r'Cash\s*£([\d,]+)', text)
-        if cash_match:
-            prices['price_min_gbp'] = int(cash_match.group(1).replace(',', ''))
+        # RRP価格範囲から取得
+        rrp_span = soup.find('span', class_='deals-cta-list__rrp-price')
+        if rrp_span:
+            price_wraps = rrp_span.find_all('span', class_='price--no-wrap')
+            if len(price_wraps) >= 2:
+                # 最小価格
+                min_price_text = price_wraps[0].get_text(strip=True)
+                min_price_match = re.search(r'£([\d,]+)', min_price_text)
+                if min_price_match:
+                    prices['price_min_gbp'] = int(min_price_match.group(1).replace(',', ''))
+                
+                # 最大価格
+                max_price_text = price_wraps[1].get_text(strip=True)
+                max_price_match = re.search(r'£([\d,]+)', max_price_text)
+                if max_price_match:
+                    prices['price_max_gbp'] = int(max_price_match.group(1).replace(',', ''))
         
-        # Used価格  
-        used_match = re.search(r'Used\s*£([\d,]+)', text)
-        if used_match:
-            prices['price_used_gbp'] = int(used_match.group(1).replace(',', ''))
+        # Used価格
+        summary_items = soup.find_all('div', class_='summary-list__item')
+        for item in summary_items:
+            dt = item.find('dt')
+            dd = item.find('dd')
+            if dt and dd and 'Used' in dt.get_text():
+                used_price_text = dd.get_text(strip=True)
+                used_match = re.search(r'£([\d,]+)', used_price_text)
+                if used_match:
+                    prices['price_used_gbp'] = int(used_match.group(1).replace(',', ''))
+                break
         
-        # RRP範囲
-        rrp_match = re.search(r'RRP.*?£([\d,]+)\s*to\s*£([\d,]+)', text)
-        if rrp_match:
-            if not prices.get('price_min_gbp'):
-                prices['price_min_gbp'] = int(rrp_match.group(1).replace(',', ''))
-            prices['price_max_gbp'] = int(rrp_match.group(2).replace(',', ''))
+        # Cash価格（フォールバック）
+        if 'price_min_gbp' not in prices:
+            text = soup.get_text()
+            cash_match = re.search(r'Cash\s*£([\d,]+)', text)
+            if cash_match:
+                prices['price_min_gbp'] = int(cash_match.group(1).replace(',', ''))
         
         return prices
     
-    def _extract_media_urls(self, soup: BeautifulSoup) -> List[str]:
-        """高解像度のメディアURLを取得"""
+    def _extract_media_urls_from_slider(self, soup: BeautifulSoup) -> List[str]:
+        """media-slider__imageクラスから画像URLを取得"""
         media_urls = []
         seen_urls = set()
         
-        # media-slider__imageクラスの画像を探す
-        for img in soup.find_all('img', class_='media-slider__image'):
-            # srcsetがある場合は最高解像度を取得
+        # media-slider__imageクラスの画像のみを取得
+        slider_images = soup.find_all('img', class_='media-slider__image')
+        
+        for img in slider_images:
+            # srcsetまたはsrcから取得
+            url = None
             if img.get('srcset'):
-                src = img['srcset']
-                # クエリパラメータを除去して高解像度版のURLを作成
-                if 'images.prismic.io' in src:
-                    base_url = src.split('?')[0]
-                    high_res_url = f"{base_url}?auto=format&fit=max&q=90"
-                    if high_res_url not in seen_urls:
-                        media_urls.append(high_res_url)
-                        seen_urls.add(high_res_url)
+                url = img['srcset'].split(' ')[0]  # 最初のURLを取得
             elif img.get('src'):
-                src = img['src']
-                if 'images.prismic.io' in src:
-                    base_url = src.split('?')[0]
-                    high_res_url = f"{base_url}?auto=format&fit=max&q=90"
-                    if high_res_url not in seen_urls:
-                        media_urls.append(high_res_url)
-                        seen_urls.add(high_res_url)
+                url = img['src']
+            
+            if url and 'images.prismic.io' in url:
+                # 高解像度版のURLを作成（クエリパラメータを調整）
+                base_url = url.split('?')[0]
+                # 大きなサイズ、高品質で取得
+                high_res_url = f"{base_url}?auto=format&fit=max&q=90&w=1920"
+                
+                if high_res_url not in seen_urls:
+                    media_urls.append(high_res_url)
+                    seen_urls.add(high_res_url)
         
-        # 追加の画像を探す（通常のimgタグ）
-        if len(media_urls) < 5:
-            for img in soup.find_all('img', src=True):
-                src = img['src']
-                if ('carwow' in src or 'prismic' in src) and src not in seen_urls:
-                    if 'logo' not in src.lower() and 'icon' not in src.lower():
-                        media_urls.append(src)
-                        seen_urls.add(src)
-                        if len(media_urls) >= 10:
-                            break
+        # 注: Seleniumが必要な場合は、すべてのスライダー画像を取得できない可能性がある
         
-        return media_urls[:10]  # 最大10枚
+        return media_urls
     
     def _scrape_specifications(self, slug: str) -> Dict:
         """Specificationsページから詳細データ取得"""
@@ -179,13 +188,12 @@ class CarwowScraper:
             specs_resp = requests.get(specs_url, headers=HEADERS, timeout=30, allow_redirects=False)
             
             if specs_resp.status_code != 200:
-                # specificationsページがない場合
                 return self._extract_specs_from_main(slug)
             
             specs_soup = BeautifulSoup(specs_resp.text, 'lxml')
             
             # グレードとエンジン情報の取得
-            grades_engines = self._extract_grades_engines(specs_soup)
+            grades_engines = self._extract_grades_engines_from_elements(specs_soup)
             
             # 基本スペックの取得
             specifications = self._extract_basic_specs(specs_soup)
@@ -199,98 +207,97 @@ class CarwowScraper:
             print(f"    Error getting specifications: {e}")
             return self._extract_specs_from_main(slug)
     
-    def _extract_grades_engines(self, soup: BeautifulSoup) -> List[Dict]:
-        """グレードとエンジン情報を抽出"""
+    def _extract_grades_engines_from_elements(self, soup: BeautifulSoup) -> List[Dict]:
+        """指定された要素からグレードとエンジン情報を抽出"""
         grades_engines = []
         
-        # trim-article__title-part-2からグレード名を取得
-        grade_elements = soup.find_all('span', class_='trim-article__title-part-2')
+        # trim-article要素を探す（各グレードのコンテナ）
+        trim_articles = soup.find_all('article', class_=lambda x: x and 'trim-article' in x)
         
-        for grade_elem in grade_elements:
-            grade_name = grade_elem.get_text(strip=True)
-            
-            # このグレードに関連する情報を収集
+        if not trim_articles:
+            # articleタグがない場合は別の方法で探す
+            trim_sections = soup.find_all('div', class_=lambda x: x and 'trim' in str(x))
+        else:
+            trim_sections = trim_articles
+        
+        for section in trim_sections:
             grade_info = {
-                'grade': grade_name,
+                'grade': 'Standard',
                 'engine': '',
-                'price_min_gbp': None,
+                'engine_price_gbp': None,  # 新しい価格列
                 'fuel': '',
                 'transmission': '',
                 'drive_type': '',
                 'power_bhp': None
             }
             
-            # 親要素から詳細情報を探す
-            parent = grade_elem.find_parent('div', recursive=True)
-            if parent:
-                parent_text = parent.get_text()
-                
-                # RRP価格を探す
-                rrp_match = re.search(r'RRP\s*£([\d,]+)', parent_text)
+            # グレード名を取得（trim-article__title-part-2から）
+            grade_elem = section.find('span', class_='trim-article__title-part-2')
+            if grade_elem:
+                grade_info['grade'] = grade_elem.get_text(strip=True)
+            
+            # エンジン情報を取得（specification-breakdown__titleから）
+            engine_div = section.find('div', class_='specification-breakdown__title')
+            if engine_div:
+                # エンジン情報をそのまま使用（編集しない）
+                grade_info['engine'] = engine_div.get_text(strip=True)
+            
+            # エンジンごとの価格を取得（trim-article__rrpから）
+            rrp_elem = section.find('span', class_='trim-article__rrp')
+            if rrp_elem:
+                rrp_text = rrp_elem.get_text(strip=True)
+                rrp_match = re.search(r'£([\d,]+)', rrp_text)
                 if rrp_match:
-                    grade_info['price_min_gbp'] = int(rrp_match.group(1).replace(',', ''))
-                
-                # エンジン情報を探す（114kW 42.2kWhのような形式）
-                engine_match = re.search(r'(\d+kW\s+[\d.]+kWh)', parent_text)
-                if engine_match:
-                    grade_info['engine'] = engine_match.group(1)
+                    grade_info['engine_price_gbp'] = int(rrp_match.group(1).replace(',', ''))
             
-            # specification-breakdown__category-list-itemから詳細情報を取得
-            breakdown_items = soup.find_all('li', class_='specification-breakdown__category-list-item')
-            
-            for item in breakdown_items:
-                item_text = item.get_text(strip=True)
+            # specification-breakdown__category-listから詳細を取得
+            category_list = section.find('ul', class_='specification-breakdown__category-list')
+            if category_list:
+                list_items = category_list.find_all('li', class_='specification-breakdown__category-list-item')
                 
-                # 燃料タイプ
-                if any(fuel in item_text.lower() for fuel in ['petrol', 'diesel', 'electric', 'hybrid']):
-                    if 'petrol' in item_text.lower():
-                        grade_info['fuel'] = 'Petrol'
-                    elif 'diesel' in item_text.lower():
-                        grade_info['fuel'] = 'Diesel'
-                    elif 'electric' in item_text.lower():
-                        grade_info['fuel'] = 'Electric'
-                    elif 'hybrid' in item_text.lower():
-                        grade_info['fuel'] = 'Hybrid'
+                for item in list_items:
+                    item_text = item.get_text(strip=True)
                     
-                    # エンジンサイズも含まれることがある（1.6 L Petrol）
-                    if 'L' in item_text:
-                        if not grade_info['engine']:
-                            grade_info['engine'] = item_text
-                
-                # トランスミッション
-                if any(trans in item_text.lower() for trans in ['automatic', 'manual', 'cvt', 'dct']):
-                    grade_info['transmission'] = item_text
-                
-                # 駆動方式
-                if 'wheel drive' in item_text.lower():
-                    grade_info['drive_type'] = item_text
-                
-                # パワー（bhp）
-                bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
-                if bhp_match:
-                    grade_info['power_bhp'] = int(bhp_match.group(1))
+                    # トランスミッション（Automatic/Manual等をそのまま）
+                    if any(trans in item_text for trans in ['Automatic', 'Manual', 'CVT', 'DCT']):
+                        grade_info['transmission'] = item_text
+                    
+                    # 駆動方式
+                    elif 'wheel drive' in item_text.lower():
+                        grade_info['drive_type'] = item_text
+                    
+                    # 燃料タイプ（エンジンサイズと一緒の場合も）
+                    elif any(fuel in item_text.lower() for fuel in ['petrol', 'diesel', 'electric', 'hybrid']):
+                        if 'petrol' in item_text.lower():
+                            grade_info['fuel'] = 'Petrol'
+                        elif 'diesel' in item_text.lower():
+                            grade_info['fuel'] = 'Diesel'
+                        elif 'electric' in item_text.lower():
+                            grade_info['fuel'] = 'Electric'
+                        elif 'hybrid' in item_text.lower():
+                            if 'plug-in' in item_text.lower():
+                                grade_info['fuel'] = 'Plug-in Hybrid'
+                            else:
+                                grade_info['fuel'] = 'Hybrid'
+                    
+                    # パワー（bhp）
+                    bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
+                    if bhp_match:
+                        grade_info['power_bhp'] = int(bhp_match.group(1))
             
             grades_engines.append(grade_info)
         
-        # グレード情報が見つからない場合のフォールバック
+        # データが見つからない場合のフォールバック
         if not grades_engines:
-            # デフォルトグレードを作成
             default_grade = {
                 'grade': 'Standard',
-                'engine': '',
-                'price_min_gbp': None,
-                'fuel': self._detect_fuel_from_text(soup.get_text()),
-                'transmission': self._detect_transmission_from_text(soup.get_text()),
-                'drive_type': self._detect_drive_type_from_text(soup.get_text()),
-                'power_bhp': self._extract_power_from_text(soup.get_text())
+                'engine': 'N/A',
+                'engine_price_gbp': None,
+                'fuel': 'N/A',
+                'transmission': 'N/A',
+                'drive_type': 'N/A',
+                'power_bhp': None
             }
-            
-            # エンジン情報を探す
-            text = soup.get_text()
-            engine_match = re.search(r'(\d+kW\s+[\d.]+kWh|\d+\.?\d*\s*L\s+\w+)', text)
-            if engine_match:
-                default_grade['engine'] = engine_match.group(1)
-            
             grades_engines.append(default_grade)
         
         return grades_engines
@@ -310,7 +317,7 @@ class CarwowScraper:
         if seats_match:
             specs['seats'] = int(seats_match.group(1))
         
-        # 寸法（SVG内のtspanから）
+        # 寸法
         dimensions = []
         for tspan in soup.find_all('tspan'):
             tspan_text = tspan.get_text(strip=True)
@@ -326,15 +333,10 @@ class CarwowScraper:
             if boot_match:
                 specs['boot_capacity_l'] = int(boot_match.group(1))
         
-        if 'Wheelbase' in text:
-            wheelbase_match = re.search(r'Wheelbase\s*([\d.]+)\s*m', text)
-            if wheelbase_match:
-                specs['wheelbase_m'] = float(wheelbase_match.group(1))
-        
-        if 'Turning circle' in text:
-            turning_match = re.search(r'Turning circle\s*([\d.]+)\s*m', text)
-            if turning_match:
-                specs['turning_circle_m'] = float(turning_match.group(1))
+        if 'Battery capacity' in text:
+            battery_match = re.search(r'Battery capacity\s*([\d.]+)\s*kWh', text)
+            if battery_match:
+                specs['battery_capacity_kwh'] = float(battery_match.group(1))
         
         return specs
     
@@ -349,7 +351,6 @@ class CarwowScraper:
             if colors_resp.status_code == 200:
                 colors_soup = BeautifulSoup(colors_resp.text, 'lxml')
                 
-                # model-hub__colour-details-titleクラスから色名を取得
                 for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
                     color_text = h4.get_text(strip=True)
                     # 価格部分を除去
@@ -361,35 +362,33 @@ class CarwowScraper:
         
         return colors
     
-    def _detect_body_types(self, make: str, model: str) -> List[str]:
-        """車両のボディタイプを検出"""
-        body_types = []
+    def _get_body_types_for_model(self, make: str, model: str) -> List[str]:
+        """
+        car-chooserページから車両のボディタイプを取得
+        注: 現時点ではSeleniumが必要なため、暫定的な実装
+        """
+        # TODO: Selenium実装後、以下のロジックを実装
+        # 1. 各ボディタイプのcar-chooserページをSeleniumで開く
+        # 2. <h3 class="card-compact__title">要素から車両名を取得
+        # 3. make + modelが一致する車両のボディタイプを記録
         
-        # モデル名からヒントを得る
+        # 暫定的な実装：モデル名から推測
+        body_types = []
         model_lower = model.lower()
         
-        if 'convertible' in model_lower or 'cabrio' in model_lower or 'roadster' in model_lower:
-            body_types.append('Convertible')
-        if 'suv' in model_lower or 'cross' in model_lower:
-            body_types.append('SUV')
-        if 'estate' in model_lower or 'touring' in model_lower or 'avant' in model_lower:
-            body_types.append('Estate')
+        if 'convertible' in model_lower or 'cabrio' in model_lower:
+            body_types.append('Convertibles')
+        if 'suv' in model_lower:
+            body_types.append('SUVs')
+        if 'estate' in model_lower or 'touring' in model_lower:
+            body_types.append('Estate cars')
         if 'coupe' in model_lower or 'coupé' in model_lower:
-            body_types.append('Coupe')
-        if 'saloon' in model_lower or 'sedan' in model_lower:
-            body_types.append('Saloon')
+            body_types.append('Coupes')
         
-        # ElectricやHybridは別途判定
-        if 'electric' in model_lower or 'e-' in model_lower or '-e' in model_lower:
-            if 'Electric' not in body_types:
-                body_types.append('Electric')
+        # Electricは燃料タイプなので、body_typeとしては扱わない
         
-        # デフォルトでHatchbackの可能性を考慮
         if not body_types:
-            # 小型車の場合はHatchbackの可能性が高い
-            small_car_makes = ['fiat', 'mini', 'smart', 'toyota', 'honda', 'mazda']
-            if make.lower() in small_car_makes:
-                body_types.append('Hatchback')
+            body_types.append('Hatchbacks')  # デフォルト
         
         return body_types
     
@@ -403,122 +402,25 @@ class CarwowScraper:
                 return {'grades_engines': [], 'specifications': {}}
             
             soup = BeautifulSoup(main_resp.text, 'lxml')
-            text = soup.get_text()
             
             # デフォルトグレードを作成
             grade_info = {
                 'grade': 'Standard',
-                'engine': '',
-                'price_min_gbp': None,
-                'fuel': self._detect_fuel_from_text(text),
-                'transmission': self._detect_transmission_from_text(text),
-                'drive_type': self._detect_drive_type_from_text(text),
-                'power_bhp': self._extract_power_from_text(text)
+                'engine': 'N/A',
+                'engine_price_gbp': None,
+                'fuel': 'N/A',
+                'transmission': 'N/A',
+                'drive_type': 'N/A',
+                'power_bhp': None
             }
-            
-            # エンジン情報を探す
-            engine_patterns = [
-                r'(\d+\.?\d*)\s*litre',
-                r'(\d+\.?\d*)L\s+\w+',
-                r'(\d+)cc',
-                r'(\d+kW\s+[\d.]+kWh)'
-            ]
-            
-            for pattern in engine_patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    grade_info['engine'] = match.group(0)
-                    break
-            
-            # 基本スペック
-            specs = {}
-            
-            # ドア数を推定
-            if 'coupe' in text.lower() or 'coupé' in text.lower():
-                specs['doors'] = 2
-            elif 'five-door' in text.lower() or '5-door' in text.lower():
-                specs['doors'] = 5
-            elif 'three-door' in text.lower() or '3-door' in text.lower():
-                specs['doors'] = 3
-            
-            # シート数を推定
-            seats_match = re.search(r'(\d+)[\s-]?seat', text, re.IGNORECASE)
-            if seats_match:
-                specs['seats'] = int(seats_match.group(1))
             
             return {
                 'grades_engines': [grade_info],
-                'specifications': specs
+                'specifications': {}
             }
             
         except:
             return {'grades_engines': [], 'specifications': {}}
-    
-    def _detect_fuel_from_text(self, text: str) -> str:
-        """テキストから燃料タイプを検出"""
-        text_lower = text.lower()
-        
-        if 'electric' in text_lower or 'ev' in text_lower or 'kwh' in text_lower:
-            return 'Electric'
-        elif 'plug-in hybrid' in text_lower or 'phev' in text_lower:
-            return 'Plug-in Hybrid'
-        elif 'hybrid' in text_lower:
-            return 'Hybrid'
-        elif 'diesel' in text_lower:
-            return 'Diesel'
-        elif 'petrol' in text_lower or 'gasoline' in text_lower:
-            return 'Petrol'
-        
-        return 'Petrol'  # デフォルト
-    
-    def _detect_transmission_from_text(self, text: str) -> str:
-        """テキストからトランスミッションを検出"""
-        text_lower = text.lower()
-        
-        if 'automatic' in text_lower or 'auto' in text_lower:
-            return 'Automatic'
-        elif 'manual' in text_lower:
-            return 'Manual'
-        elif 'cvt' in text_lower:
-            return 'CVT'
-        elif 'dct' in text_lower or 'dual-clutch' in text_lower:
-            return 'DCT'
-        
-        # 電気自動車はデフォルトで自動
-        if 'electric' in text_lower:
-            return 'Automatic'
-        
-        return ''
-    
-    def _detect_drive_type_from_text(self, text: str) -> str:
-        """テキストから駆動方式を検出"""
-        text_lower = text.lower()
-        
-        if 'all-wheel drive' in text_lower or 'awd' in text_lower:
-            return 'All-wheel drive'
-        elif 'four-wheel drive' in text_lower or '4wd' in text_lower:
-            return 'Four-wheel drive'
-        elif 'rear-wheel drive' in text_lower or 'rwd' in text_lower:
-            return 'Rear-wheel drive'
-        elif 'front-wheel drive' in text_lower or 'fwd' in text_lower:
-            return 'Front-wheel drive'
-        
-        return 'Front-wheel drive'  # デフォルト
-    
-    def _extract_power_from_text(self, text: str) -> Optional[int]:
-        """テキストからパワー（馬力）を抽出"""
-        # bhp/hp形式
-        hp_match = re.search(r'(\d+)\s*(?:bhp|hp)', text, re.IGNORECASE)
-        if hp_match:
-            return int(hp_match.group(1))
-        
-        # kW形式（変換が必要）
-        kw_match = re.search(r'(\d+)\s*kW', text)
-        if kw_match:
-            kw = int(kw_match.group(1))
-            return int(kw * 1.341)  # kW to hp
-        
-        return None
     
     def get_all_makers(self) -> List[str]:
         """brandsページからメーカー一覧を取得"""
@@ -529,14 +431,12 @@ class CarwowScraper:
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, 'lxml')
                 
-                # brands-list__group-item-title-name クラスからブランド名を取得
                 for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
                     brand_name = brand_div.get_text(strip=True).lower()
                     brand_slug = brand_name.replace(' ', '-')
                     if brand_slug and brand_slug not in makers:
                         makers.append(brand_slug)
                 
-                # フォールバック: リンクから取得
                 if not makers:
                     for link in soup.find_all('a', href=True):
                         href = link['href']
@@ -548,7 +448,6 @@ class CarwowScraper:
         except:
             pass
         
-        # 取得できなかった場合は既知のリスト
         if not makers:
             makers = [
                 'abarth', 'alfa-romeo', 'alpine', 'aston-martin', 'audi',
@@ -576,16 +475,12 @@ class CarwowScraper:
             
             soup = BeautifulSoup(resp.text, 'lxml')
             
-            # article.card-compactから取得
             articles = soup.find_all('article', class_='card-compact')
             
             for article in articles:
-                # リンクを探す
                 for link in article.find_all('a', href=True):
                     href = link['href']
-                    # URLからモデルを抽出
                     if f'/{maker}/' in href:
-                        # URLパースしてモデル部分を取得
                         if 'carwow.co.uk' in href:
                             parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
                         else:
@@ -598,7 +493,6 @@ class CarwowScraper:
                                 seen.add(model_slug)
                                 break
             
-            # articleで見つからない場合、すべてのaタグから取得
             if not models:
                 all_links = soup.find_all('a', href=True)
                 
