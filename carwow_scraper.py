@@ -280,7 +280,8 @@ class CarwowScraper:
                     'power_bhp': None
                 }
                 
-                # エンジンごとの価格を取得
+                # エンジンごとの価格を取得（正しいパスで）
+                # パターン1: trim-article__rrp
                 rrp_elem = section.find('span', class_='trim-article__rrp')
                 if rrp_elem:
                     rrp_text = rrp_elem.get_text(strip=True)
@@ -288,39 +289,43 @@ class CarwowScraper:
                     if rrp_match:
                         grade_info['engine_price_gbp'] = int(rrp_match.group(1).replace(',', ''))
                 
-                # 仕様詳細を取得
-                category_list = section.find('ul', class_='specification-breakdown__category-list')
-                if category_list:
+                # パターン2: 親要素内でRRP価格を探す
+                if not grade_info['engine_price_gbp']:
+                    section_text = section.get_text()
+                    rrp_matches = re.findall(r'RRP\s*£([\d,]+)', section_text)
+                    if rrp_matches:
+                        # 最初のRRP価格を使用
+                        grade_info['engine_price_gbp'] = int(rrp_matches[0].replace(',', ''))
+                
+                # 仕様詳細を取得（各エンジンセクション内で探す）
+                # まず現在のセクション内で探す
+                category_lists = section.find_all('ul', class_='specification-breakdown__category-list')
+                
+                for category_list in category_lists:
                     list_items = category_list.find_all('li', class_='specification-breakdown__category-list-item')
                     
                     for item in list_items:
                         item_text = item.get_text(strip=True)
                         
-                        # トランスミッション
-                        if any(trans in item_text for trans in ['Automatic', 'Manual', 'CVT', 'DCT']):
-                            grade_info['transmission'] = item_text
+                        # トランスミッション（正確に取得）
+                        if 'Automatic' in item_text and not grade_info['transmission']:
+                            grade_info['transmission'] = 'Automatic'
+                        elif 'Manual' in item_text and not grade_info['transmission']:
+                            grade_info['transmission'] = 'Manual'
+                        elif 'CVT' in item_text and not grade_info['transmission']:
+                            grade_info['transmission'] = 'CVT'
+                        elif 'DCT' in item_text and not grade_info['transmission']:
+                            grade_info['transmission'] = 'DCT'
                         
-                        # 駆動方式
-                        elif 'wheel drive' in item_text.lower():
+                        # 駆動方式（正確に取得）
+                        if 'wheel drive' in item_text.lower() and not grade_info['drive_type']:
                             grade_info['drive_type'] = item_text
                         
-                        # 燃料タイプ
-                        elif any(fuel in item_text.lower() for fuel in ['petrol', 'diesel', 'electric', 'hybrid']):
-                            if 'petrol' in item_text.lower():
-                                grade_info['fuel'] = 'Petrol'
-                            elif 'diesel' in item_text.lower():
-                                grade_info['fuel'] = 'Diesel'
-                            elif 'electric' in item_text.lower():
-                                grade_info['fuel'] = 'Electric'
-                            elif 'plug-in hybrid' in item_text.lower():
-                                grade_info['fuel'] = 'Plug-in Hybrid'
-                            elif 'hybrid' in item_text.lower():
-                                grade_info['fuel'] = 'Hybrid'
-                        
                         # パワー（bhp）
-                        bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
-                        if bhp_match:
-                            grade_info['power_bhp'] = int(bhp_match.group(1))
+                        if 'bhp' in item_text.lower() and not grade_info['power_bhp']:
+                            bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
+                            if bhp_match:
+                                grade_info['power_bhp'] = int(bhp_match.group(1))
                 
                 # 燃料タイプをエンジン情報から推測
                 if not grade_info['fuel'] and engine != 'N/A':
