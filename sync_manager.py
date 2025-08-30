@@ -309,9 +309,9 @@ class GoogleSheetsManager:
                 if num_cols <= 26:
                     col_letter = chr(64 + num_cols)
                 else:
-                    # AA, AB, AC...の形式
-                    first_letter = chr(64 + ((num_cols - 1) // 26))
-                    second_letter = chr(65 + ((num_cols - 1) % 26))
+                    # AA, AB, AC...の形式（正しい計算）
+                    first_letter = 'A'
+                    second_letter = chr(64 + (num_cols - 26))
                     col_letter = first_letter + second_letter
                 
                 range_name = f"A{start_row}:{col_letter}{end_row}"
