@@ -577,7 +577,7 @@ class CarwowScraper:
         except Exception as e:
             print(f"    Error getting models for {maker}: {e}")
         
-        return models:
+        return models
                             parts = href.strip('/').split('?')[0].split('#')[0].split('/')
                         
                         if len(parts) >= 2 and parts[0] == maker:
