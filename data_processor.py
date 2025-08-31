@@ -377,12 +377,14 @@ class DataProcessor:
         if not dimensions_mm or dimensions_mm == self.na_value:
             return self.dash_value
         
-        numbers = re.findall(r'\d+', dimensions_mm)
+        # カンマ区切りの数字を含む場合に対応
+        numbers = re.findall(r'[\d,]+', dimensions_mm)
         
         if len(numbers) >= 3:
-            length = int(numbers[0])
-            width = int(numbers[1])
-            height = int(numbers[2])
+            # カンマを除去して数値に変換
+            length = int(numbers[0].replace(',', ''))
+            width = int(numbers[1].replace(',', ''))
+            height = int(numbers[2].replace(',', ''))
             
             return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
         
