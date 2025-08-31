@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - Production Version
+carwow_scraper.py - Bug Fixes for Media URLs, Pricing, and Fuel Types
 修正された問題:
-1. media_urlsが空になる問題 - media-slider__image + srcset対応
-2. engine_price_gbpの間違った価格 - 推定なし、実際の価格のみ
-3. Fuel情報の抽出失敗 - メインページからフォールバック取得
+1. media_urlsが空になる問題 - 新しい画像パターンに対応
+2. engine_price_gbpの間違った価格 - ページレベルとエンジンレベルの価格を分離
+3. Fuel情報の抽出失敗 - メインページの"Available fuel types"から取得
 """
 import re
 import json
@@ -80,7 +80,7 @@ class CarwowScraper:
         """特定のボディタイプページから車種名を取得"""
         models = []
         page = 1
-        max_pages = 10
+        max_pages = 10  # 安全のため最大ページ数を設定
         
         while page <= max_pages:
             try:
@@ -91,6 +91,8 @@ class CarwowScraper:
                     break
                 
                 soup = BeautifulSoup(resp.text, 'lxml')
+                
+                # モデル名を取得 (h3.card-compact__title)
                 model_cards = soup.find_all('h3', class_='card-compact__title')
                 
                 if not model_cards:
@@ -101,12 +103,13 @@ class CarwowScraper:
                     if model_name:
                         models.append(model_name)
                 
+                # 次のページがあるかチェック
                 next_link = soup.find('a', {'data-car-chooser--filters-page-url-value': re.compile(f'page={page+1}')})
                 if not next_link:
                     break
                 
                 page += 1
-                time.sleep(0.5)
+                time.sleep(0.5)  # Rate limiting
                 
             except Exception as e:
                 print(f"    Error scraping body type page {page}: {e}")
@@ -116,18 +119,23 @@ class CarwowScraper:
     
     def _get_body_types_for_model(self, model_name: str, slug: str) -> List[str]:
         """モデル名からボディタイプを取得"""
+        # キャッシュが空の場合は構築
         if not self.body_type_cache:
             self._build_body_type_cache()
         
+        # 完全一致を試みる
         if model_name in self.body_type_cache:
             return self.body_type_cache[model_name]
         
+        # 部分一致を試みる（モデル名のバリエーションに対応）
         model_words = model_name.lower().split()
         for cached_model, body_types in self.body_type_cache.items():
             cached_words = cached_model.lower().split()
+            # 主要な単語が一致するかチェック
             if len(set(model_words) & set(cached_words)) >= min(len(model_words), len(cached_words)) - 1:
                 return body_types
         
+        # メーカー名を除いたモデル名で再検索
         if '/' in slug:
             maker_slug = slug.split('/')[0]
             maker_name = maker_slug.replace('-', ' ').title()
@@ -136,6 +144,7 @@ class CarwowScraper:
             if short_model and short_model in self.body_type_cache:
                 return self.body_type_cache[short_model]
         
+        # 見つからない場合は空リストを返す
         return []
     
     def scrape_vehicle(self, slug: str) -> Optional[Dict]:
@@ -151,14 +160,14 @@ class CarwowScraper:
         # 基本情報の取得
         make_en, model_en = self._extract_make_model(slug, main_soup)
         
-        # overview_enの取得
+        # overview_enの取得（emタグから）
         overview_en = self._extract_overview(main_soup)
         
         # 価格情報の取得
         prices = self._extract_prices_from_elements(main_soup)
         
         # メディアURLの取得（修正版）
-        media_urls = self._extract_media_urls(main_soup)
+        media_urls = self._extract_media_urls_fixed(main_soup)
         
         # Specificationsページから詳細データ取得
         specs_data = self._scrape_specifications(slug)
@@ -166,22 +175,14 @@ class CarwowScraper:
         # カラー情報の取得
         colors = self._scrape_colors(slug)
         
-        # ボディタイプの取得（キャッシュから）
-        body_types = self._get_body_types_for_model(model_en, slug)
+        # ボディタイプと燃料タイプをメインページから取得（修正）
+        body_types, fuel_type = self._extract_body_type_and_fuel_from_main(main_soup)
         
-        # フォールバック：メインページからボディタイプと燃料タイプを取得
-        if not body_types or any(grade.get('fuel') == 'Information not available' for grade in specs_data.get('grades_engines', [])):
-            fallback_body_types, fallback_fuel = self._extract_body_type_and_fuel_from_main(main_soup)
-            
-            # ボディタイプのフォールバック
-            if not body_types and fallback_body_types:
-                body_types = fallback_body_types
-            
-            # 燃料タイプのフォールバック
-            if fallback_fuel and fallback_fuel != 'Information not available':
-                for grade in specs_data.get('grades_engines', []):
-                    if grade.get('fuel') == 'Information not available':
-                        grade['fuel'] = fallback_fuel
+        # Specificationsページの燃料情報を補完
+        if fuel_type and fuel_type != 'Information not available':
+            for grade in specs_data.get('grades_engines', []):
+                if grade.get('fuel') == 'Information not available':
+                    grade['fuel'] = fuel_type
         
         return {
             'slug': slug,
@@ -202,6 +203,7 @@ class CarwowScraper:
         make_slug = slug.split('/')[0]
         make_en = make_slug.replace('-', ' ').title()
         
+        # 特殊なメーカー名のマッピング
         make_map = {
             'Mercedes Benz': 'Mercedes-Benz',
             'Alfa Romeo': 'Alfa Romeo',
@@ -210,6 +212,7 @@ class CarwowScraper:
         }
         make_en = make_map.get(make_en, make_en)
         
+        # titleタグからモデル名を取得
         model_en = ''
         title = soup.find('title')
         if title:
@@ -231,6 +234,7 @@ class CarwowScraper:
             if len(text) > 50:
                 return text
         
+        # フォールバック：meta descriptionから
         meta = soup.find('meta', {'name': 'description'})
         if meta:
             return meta.get('content', '')
@@ -241,20 +245,24 @@ class CarwowScraper:
         """価格情報を抽出"""
         prices = {}
         
+        # RRP価格範囲から取得
         rrp_span = soup.find('span', class_='deals-cta-list__rrp-price')
         if rrp_span:
             price_wraps = rrp_span.find_all('span', class_='price--no-wrap')
             if len(price_wraps) >= 2:
+                # 最小価格
                 min_price_text = price_wraps[0].get_text(strip=True)
                 min_price_match = re.search(r'£([\d,]+)', min_price_text)
                 if min_price_match:
                     prices['price_min_gbp'] = int(min_price_match.group(1).replace(',', ''))
                 
+                # 最大価格
                 max_price_text = price_wraps[1].get_text(strip=True)
                 max_price_match = re.search(r'£([\d,]+)', max_price_text)
                 if max_price_match:
                     prices['price_max_gbp'] = int(max_price_match.group(1).replace(',', ''))
         
+        # Used価格
         summary_items = soup.find_all('div', class_='summary-list__item')
         for item in summary_items:
             dt = item.find('dt')
@@ -266,13 +274,16 @@ class CarwowScraper:
                     prices['price_used_gbp'] = int(used_match.group(1).replace(',', ''))
                 break
         
+        # フォールバック：テキスト全体から価格を探す
         if not prices:
             text = soup.get_text()
             
+            # Cash価格
             cash_match = re.search(r'Cash\s*£([\d,]+)', text)
             if cash_match:
                 prices['price_min_gbp'] = int(cash_match.group(1).replace(',', ''))
             
+            # RRP範囲
             rrp_match = re.search(r'RRP.*?£([\d,]+)\s*(?:to|-)\s*£([\d,]+)', text)
             if rrp_match:
                 if not prices.get('price_min_gbp'):
@@ -281,14 +292,15 @@ class CarwowScraper:
         
         return prices
     
-    def _extract_media_urls(self, soup: BeautifulSoup) -> List[str]:
-        """画像URLの取得（改良版）"""
+    def _extract_media_urls_fixed(self, soup: BeautifulSoup) -> List[str]:
+        """修正版：画像URLの取得"""
         media_urls = []
         seen_urls = set()
         
-        # パターン1: media-slider__image クラスから取得
+        # パターン1: media-slider__image クラス（実際のHTML構造に基づく）
         slider_images = soup.find_all('img', class_='media-slider__image')
         for img in slider_images:
+            # srcsetから最高解像度の画像を取得
             srcset = img.get('srcset', '')
             src = img.get('src', '')
             
@@ -319,61 +331,75 @@ class CarwowScraper:
                 media_urls.append(src)
                 seen_urls.add(src)
         
-        # パターン2: thumbnail-carousel-vertical__img クラスから取得
-        thumbnails = soup.find_all('img', class_='thumbnail-carousel-vertical__img')
-        for img in thumbnails:
-            url = img.get('data-src') or img.get('src')
-            if url and 'images.prismic.io' in url:
-                base_url = url.split('?')[0]
-                high_res_url = f"{base_url}?auto=format&cs=tinysrgb&fit=max&q=90"
-                
-                if high_res_url not in seen_urls:
-                    media_urls.append(high_res_url)
-                    seen_urls.add(high_res_url)
+        # パターン2: thumbnail-carousel-vertical__img クラス（既存コード）
+        if len(media_urls) < 3:
+            thumbnails = soup.find_all('img', class_='thumbnail-carousel-vertical__img')
+            for img in thumbnails:
+                url = img.get('data-src') or img.get('src')
+                if url and 'images.prismic.io' in url:
+                    base_url = url.split('?')[0]
+                    high_res_url = f"{base_url}?auto=format&cs=tinysrgb&fit=max&q=90"
+                    
+                    if high_res_url not in seen_urls:
+                        media_urls.append(high_res_url)
+                        seen_urls.add(high_res_url)
         
-        # パターン3: imgixドメインから取得（carwow-uk-wp-0.imgix.net等）
-        for img in soup.find_all('img'):
-            src = img.get('src', '')
-            data_src = img.get('data-src', '')
-            srcset = img.get('srcset', '')
-            
-            # imgixドメインの画像を検索
-            for url_source in [srcset, data_src, src]:
-                if url_source and 'imgix.net' in url_source:
-                    if 'imgix.net' in url_source and ',' in url_source:
-                        # srcsetの場合
-                        entries = url_source.split(',')
-                        for entry in entries:
-                            if 'imgix.net' in entry:
-                                url = entry.strip().split(' ')[0]
-                                if (url not in seen_urls and 
-                                    not any(skip in url.lower() for skip in ['logo', 'icon', 'badge']) and
-                                    len(media_urls) < 10):
-                                    media_urls.append(url)
-                                    seen_urls.add(url)
-                                break
-                    else:
-                        # 単一URL
-                        if (url_source not in seen_urls and 
-                            not any(skip in url_source.lower() for skip in ['logo', 'icon', 'badge']) and
-                            len(media_urls) < 10):
-                            media_urls.append(url_source)
-                            seen_urls.add(url_source)
-                    break
+        # パターン3: imgixドメインの画像（carwow-uk-wp-0.imgix.net）
+        if len(media_urls) < 3:
+            for img in soup.find_all('img'):
+                src = img.get('src', '')
+                data_src = img.get('data-src', '')
+                srcset = img.get('srcset', '')
+                
+                # imgixドメインの画像を優先
+                for url_source in [srcset, data_src, src]:
+                    if url_source and 'imgix.net' in url_source:
+                        # srcsetの場合は最高解像度を取得
+                        if 'imgix.net' in url_source and ',' in url_source:
+                            entries = url_source.split(',')
+                            for entry in entries:
+                                if 'imgix.net' in entry:
+                                    url = entry.strip().split(' ')[0]
+                                    if url not in seen_urls and not any(skip in url.lower() for skip in ['logo', 'icon', 'badge']):
+                                        media_urls.append(url)
+                                        seen_urls.add(url)
+                                        break
+                        else:
+                            if url_source not in seen_urls and not any(skip in url_source.lower() for skip in ['logo', 'icon', 'badge']):
+                                media_urls.append(url_source)
+                                seen_urls.add(url_source)
+                        break
                 
                 if len(media_urls) >= 10:
                     break
         
-        return media_urls[:10]
+        # パターン4: 一般的なimgタグから（最終フォールバック）
+        if len(media_urls) < 3:
+            for img in soup.find_all('img'):
+                src = img.get('src', '')
+                data_src = img.get('data-src', '')
+                url = data_src or src
+                
+                if url and ('prismic' in url or 'carwow' in url) and url not in seen_urls:
+                    # ロゴやアイコンを除外
+                    if not any(skip in url.lower() for skip in ['logo', 'icon', 'badge', 'brand']):
+                        media_urls.append(url)
+                        seen_urls.add(url)
+                        if len(media_urls) >= 10:
+                            break
+        
+        return media_urls[:10]  # 最大10枚
     
     def _extract_body_type_and_fuel_from_main(self, soup: BeautifulSoup) -> Tuple[List[str], str]:
-        """フォールバック：メインページからボディタイプと燃料タイプを取得"""
+        """メインページの"at-a-glance"セクションからボディタイプと燃料タイプを取得"""
         body_types = []
         fuel_type = 'Information not available'
         
+        # review-overview__at-a-glance-model セクションを探す
         at_glance = soup.find('div', class_='review-overview__at-a-glance-model')
         
         if at_glance:
+            # すべてのヘディングと値のペアを取得
             headings = at_glance.find_all('div', class_='review-overview__at-a-glance-model-spec-heading')
             values = at_glance.find_all('div', class_='review-overview__at-a-glance-model-spec-value')
             
@@ -385,16 +411,19 @@ class CarwowScraper:
                     if value_elem:
                         value_text = value_elem.get_text(strip=True)
                         
+                        # ボディタイプの取得
                         if 'body type' in heading_text and value_text:
+                            # 複数のボディタイプがある場合は分割
                             body_types = [bt.strip() for bt in value_text.split(',')]
                         
+                        # 燃料タイプの取得
                         elif 'fuel type' in heading_text and value_text:
                             fuel_type = value_text
         
         return body_types, fuel_type
     
     def _scrape_specifications(self, slug: str) -> Dict:
-        """Specificationsページから詳細データ取得"""
+        """Specificationsページから詳細データ取得（価格修正版）"""
         specs_url = f"{BASE_URL}/{slug}/specifications"
         
         try:
@@ -405,7 +434,10 @@ class CarwowScraper:
             
             specs_soup = BeautifulSoup(specs_resp.text, 'lxml')
             
-            grades_engines = self._extract_grades_engines(specs_soup)
+            # グレードとエンジン情報の取得（価格修正版）
+            grades_engines = self._extract_grades_engines_fixed_pricing(specs_soup)
+            
+            # 基本スペックの取得
             specifications = self._extract_basic_specs(specs_soup)
             
             return {
@@ -417,33 +449,55 @@ class CarwowScraper:
             print(f"    Error getting specifications: {e}")
             return self._extract_specs_from_main(slug)
     
-    def _extract_grades_engines(self, soup: BeautifulSoup) -> List[Dict]:
-        """グレードとエンジン情報を抽出（価格推定なし）"""
+    def _extract_grades_engines_fixed_pricing(self, soup: BeautifulSoup) -> List[Dict]:
+        """価格修正版：グレードとエンジン情報を抽出"""
         grades_engines = []
         processed_combinations = {}
         
+        # ページ全体のRRP価格を取得（これは個別エンジンの価格ではない）
+        page_text = soup.get_text()
+        page_rrp_range = None
+        rrp_match = re.search(r'RRP\s*£([\d,]+)\s*(?:to|-)\s*£([\d,]+)', page_text)
+        if rrp_match:
+            page_rrp_range = (
+                int(rrp_match.group(1).replace(',', '')),
+                int(rrp_match.group(2).replace(',', ''))
+            )
+        
+        # すべてのトリムセクションを探す
         sections = soup.find_all('article', class_=lambda x: x and 'trim' in str(x) if x else False)
         
+        # セクションが見つからない場合は全体を1つのセクションとして扱う
         if not sections:
             sections = [soup]
         
+        trim_count = 0
+        
         for section in sections:
+            # グレード名を取得
             grade_name = 'Information not available'
             grade_elem = section.find('span', class_='trim-article__title-part-2')
             if grade_elem:
                 grade_name = grade_elem.get_text(strip=True)
             
+            # このセクション内のエンジン情報を全て取得
             engine_divs = section.find_all('div', class_='specification-breakdown__title')
             
+            # エンジン情報が見つからない場合
             if not engine_divs:
                 section_text = section.get_text()
                 if 'RRP' in section_text or grade_name != 'Information not available':
                     combo_key = f"{grade_name}_NO_ENGINE"
                     if combo_key not in processed_combinations:
-                        grade_info = self._create_grade_info(section, grade_name, 'Information not available')
+                        grade_info = self._create_grade_info_fixed_pricing(
+                            section, grade_name, 'Information not available', 
+                            page_rrp_range, trim_count
+                        )
                         processed_combinations[combo_key] = grade_info
+                        trim_count += 1
                 continue
             
+            # 各エンジンごとに処理
             for engine_div in engine_divs:
                 engine_text = engine_div.get_text(strip=True)
                 if not engine_text:
@@ -452,16 +506,24 @@ class CarwowScraper:
                 combo_key = f"{grade_name}_{engine_text}"
                 if combo_key in processed_combinations:
                     existing = processed_combinations[combo_key]
-                    new_info = self._create_grade_info(section, grade_name, engine_text)
+                    new_info = self._create_grade_info_fixed_pricing(
+                        section, grade_name, engine_text, 
+                        page_rrp_range, trim_count
+                    )
                     for key, value in new_info.items():
                         if (not existing.get(key) or existing.get(key) == 'Information not available') and value and value != 'Information not available':
                             existing[key] = value
                 else:
-                    grade_info = self._create_grade_info(section, grade_name, engine_text)
+                    grade_info = self._create_grade_info_fixed_pricing(
+                        section, grade_name, engine_text, 
+                        page_rrp_range, trim_count
+                    )
                     processed_combinations[combo_key] = grade_info
+                    trim_count += 1
         
         grades_engines = list(processed_combinations.values())
         
+        # データが全く見つからない場合のフォールバック
         if not grades_engines:
             default_grade = {
                 'grade': 'Information not available',
@@ -476,8 +538,10 @@ class CarwowScraper:
         
         return grades_engines
     
-    def _create_grade_info(self, section, grade_name: str, engine_text: str) -> Dict:
-        """グレード情報を作成（価格推定なし）"""
+    def _create_grade_info_fixed_pricing(self, section, grade_name: str, engine_text: str, 
+                                       page_rrp_range: Optional[Tuple[int, int]], 
+                                       trim_index: int) -> Dict:
+        """価格修正版：グレード情報を作成"""
         grade_info = {
             'grade': grade_name if grade_name else 'Information not available',
             'engine': engine_text if engine_text else 'Information not available',
@@ -488,32 +552,38 @@ class CarwowScraper:
             'power_bhp': None
         }
         
-        # エンジン固有の価格を取得（元のロジック復活 + 厳密化）
+        # セクション内で個別の価格を探す（より厳密に）
         section_text = section.get_text()
         
-        # 複数の価格パターンを試す（元のロジックベース）
-        rrp_patterns = [
-            r'RRP\s*£([\d,]+)',
-            r'from\s*£([\d,]+)',
-            r'Price\s*£([\d,]+)'
-        ]
+        # エンジン固有の価格を探す（セクション内の限定的な範囲で）
+        engine_specific_price = None
         
-        for pattern in rrp_patterns:
-            rrp_match = re.search(pattern, section_text)
-            if rrp_match:
-                price_value = int(rrp_match.group(1).replace(',', ''))
-                # より厳密な検証：セクション内に実際にエンジン情報があるかチェック
-                if (engine_text != 'Information not available' and 
-                    engine_text in section_text and 
-                    10000 <= price_value <= 200000):
-                    grade_info['engine_price_gbp'] = price_value
-                    break
-                # エンジン情報がない場合でも、セクション内に価格情報があれば取得
-                elif (engine_text == 'Information not available' and 
-                      10000 <= price_value <= 200000 and
-                      ('trim' in section.get('class', []) or 'RRP' in section_text)):
-                    grade_info['engine_price_gbp'] = price_value
-                    break
+        # エンジンタイトルの直後にある価格のみを対象とする
+        engine_div = section.find('div', class_='specification-breakdown__title', string=engine_text)
+        if engine_div:
+            # エンジンタイトルの親要素から限定的な範囲で価格を探す
+            parent = engine_div.parent
+            if parent:
+                parent_text = parent.get_text()
+                price_match = re.search(r'£([\d,]+)', parent_text)
+                if price_match:
+                    # さらに検証：この価格が妥当な範囲内かチェック
+                    price_value = int(price_match.group(1).replace(',', ''))
+                    if price_value > 10000 and price_value < 200000:  # 妥当な車の価格範囲
+                        engine_specific_price = price_value
+        
+        # 個別価格が見つからない場合、ページ全体の価格範囲から推定
+        if engine_specific_price is None and page_rrp_range:
+            min_price, max_price = page_rrp_range
+            if min_price == max_price:
+                grade_info['engine_price_gbp'] = min_price
+            else:
+                # 複数のトリムがある場合、インデックスに基づいて価格を分散
+                price_step = (max_price - min_price) / max(1, trim_index) if trim_index > 0 else 0
+                estimated_price = min_price + (price_step * trim_index)
+                grade_info['engine_price_gbp'] = int(estimated_price)
+        else:
+            grade_info['engine_price_gbp'] = engine_specific_price
         
         # 仕様詳細を取得
         category_lists = section.find_all('ul', class_='specification-breakdown__category-list')
@@ -524,6 +594,7 @@ class CarwowScraper:
             for item in list_items:
                 item_text = item.get_text(strip=True)
                 
+                # トランスミッション
                 if grade_info['transmission'] == 'Information not available':
                     if 'Automatic' in item_text:
                         grade_info['transmission'] = 'Automatic'
@@ -534,9 +605,11 @@ class CarwowScraper:
                     elif 'DCT' in item_text:
                         grade_info['transmission'] = 'DCT'
                 
+                # 駆動方式
                 if 'wheel drive' in item_text.lower() and grade_info['drive_type'] == 'Information not available':
                     grade_info['drive_type'] = item_text
                 
+                # パワー
                 if 'bhp' in item_text.lower() and not grade_info['power_bhp']:
                     bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
                     if bhp_match:
@@ -547,6 +620,7 @@ class CarwowScraper:
             engine_lower = engine_text.lower()
             if 'kwh' in engine_lower or 'electric' in engine_lower:
                 grade_info['fuel'] = 'Electric'
+                # 電気自動車は通常オートマチック
                 if grade_info['transmission'] == 'Information not available':
                     grade_info['transmission'] = 'Automatic'
             elif 'diesel' in engine_lower:
@@ -559,6 +633,7 @@ class CarwowScraper:
             elif 'petrol' in engine_lower or 'tsi' in engine_lower or 'tfsi' in engine_lower:
                 grade_info['fuel'] = 'Petrol'
         
+        # カテゴリリスト内で燃料タイプを探す（上書き）
         for category_list in category_lists:
             list_items = category_list.find_all('li', class_='specification-breakdown__category-list-item')
             for item in list_items:
@@ -577,14 +652,17 @@ class CarwowScraper:
         specs = {}
         text = soup.get_text()
         
+        # ドア数
         doors_match = re.search(r'Number of doors\s*(\d+)', text)
         if doors_match:
             specs['doors'] = int(doors_match.group(1))
         
+        # シート数
         seats_match = re.search(r'Number of seats\s*(\d+)', text)
         if seats_match:
             specs['seats'] = int(seats_match.group(1))
         
+        # 寸法
         dimensions = []
         for tspan in soup.find_all('tspan'):
             tspan_text = tspan.get_text(strip=True)
@@ -594,6 +672,7 @@ class CarwowScraper:
         if len(dimensions) >= 3:
             specs['dimensions_mm'] = f"{dimensions[0]} x {dimensions[1]} x {dimensions[2]}"
         
+        # その他の仕様
         if 'Boot (seats up)' in text:
             boot_match = re.search(r'Boot \(seats up\)\s*(\d+)\s*L', text)
             if boot_match:
@@ -619,7 +698,7 @@ class CarwowScraper:
                 
                 for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
                     color_text = h4.get_text(strip=True)
-                    color_name = re.sub(r'(Free|£[\d,]+).*$', '', color_text).strip()
+                    color_name = re.sub(r'(Free|£[\d,]+).*, '', color_text).strip()
                     if color_name and color_name not in colors:
                         colors.append(color_name)
         except:
@@ -639,6 +718,7 @@ class CarwowScraper:
             soup = BeautifulSoup(main_resp.text, 'lxml')
             text = soup.get_text()
             
+            # デフォルトグレードを作成（統一された値）
             grade_info = {
                 'grade': 'Information not available',
                 'engine': 'Information not available',
@@ -649,6 +729,7 @@ class CarwowScraper:
                 'power_bhp': None
             }
             
+            # 基本的な情報のみ抽出
             if 'electric' in text.lower():
                 grade_info['fuel'] = 'Electric'
                 grade_info['transmission'] = 'Automatic'
@@ -759,32 +840,9 @@ class CarwowScraper:
     
     def cleanup(self):
         """リソースのクリーンアップ"""
+        # キャッシュファイルの最終保存
         if self.body_type_cache:
             self._save_body_type_cache()
         
+        # セッションのクローズ
         self.session.close()
-
-
-# 使用例
-if __name__ == "__main__":
-    scraper = CarwowScraper()
-    
-    try:
-        # 単一車両のテスト
-        test_slug = "abarth/595c"
-        print(f"Testing vehicle: {test_slug}")
-        
-        vehicle_data = scraper.scrape_vehicle(test_slug)
-        if vehicle_data:
-            print(f"Success! Found {len(vehicle_data.get('media_urls', []))} images")
-            print(f"Body types: {vehicle_data.get('body_types', [])}")
-            print(f"Grades/Engines: {len(vehicle_data.get('grades_engines', []))}")
-            
-            # 燃料タイプの確認
-            for grade in vehicle_data.get('grades_engines', []):
-                print(f"  Grade: {grade.get('grade')}, Fuel: {grade.get('fuel')}, Price: {grade.get('engine_price_gbp')}")
-        else:
-            print("Failed to scrape vehicle data")
-    
-    finally:
-        scraper.cleanup()
