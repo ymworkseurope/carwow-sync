@@ -588,7 +588,7 @@ class CarwowScraper:
                                 seen.add(model_slug)
                                 break
             if not models:
-                all_links = soup.find_all('a', href=True):
+                all_links = soup.find_all('a', href=True)
                 for link in all_links:
                     href = link['href']
                     if f'/{maker}/' in href:
