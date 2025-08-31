@@ -28,7 +28,7 @@ jobs:
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID: ${{ secrets.GS_SHEET_ID }}
-      GBP_TO_JPY: "185"
+      DEEPL_KEY: ${{ secrets.DEEPL_KEY }}
     
     steps:
     - name: Checkout code
