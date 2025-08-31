@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 完全修正版
+carwow_scraper.py - 完全修正版 with Body Type Implementation
 正確な要素から情報を取得
 """
 import re
@@ -9,15 +9,140 @@ import time
 from typing import Dict, List, Optional, Tuple, Set
 from bs4 import BeautifulSoup
 import requests
+from pathlib import Path
 
 BASE_URL = "https://www.carwow.co.uk"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+# Body type URLs mapping
+BODY_TYPE_URLS = {
+    'SUV': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=SUVs',
+    'Hatchback': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=hatchbacks',
+    'Saloon': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=saloons',
+    'Coupe': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=coupes',
+    'Estate': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=estate-cars',
+    'People Carrier': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=people-carriers',
+    'Sports Car': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=sports-cars',
+    'Convertible': 'https://www.carwow.co.uk/car-chooser?vehicle_body_type%5B%5D=convertibles'
+}
 
 class CarwowScraper:
     
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        self.body_type_cache = {}
+        self._load_body_type_cache()
+    
+    def _load_body_type_cache(self):
+        """ボディタイプキャッシュを読み込み"""
+        cache_file = Path('body_type_cache.json')
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    self.body_type_cache = json.load(f)
+                print(f"Loaded body type cache with {len(self.body_type_cache)} entries")
+            except Exception as e:
+                print(f"Error loading body type cache: {e}")
+                self.body_type_cache = {}
+    
+    def _save_body_type_cache(self):
+        """ボディタイプキャッシュを保存"""
+        try:
+            with open('body_type_cache.json', 'w') as f:
+                json.dump(self.body_type_cache, f, indent=2)
+        except Exception as e:
+            print(f"Error saving body type cache: {e}")
+    
+    def _build_body_type_cache(self):
+        """全ボディタイプページをスクレイピングしてキャッシュを構築"""
+        print("Building body type cache...")
+        
+        for body_type, url in BODY_TYPE_URLS.items():
+            print(f"  Fetching {body_type} models...")
+            models = self._scrape_body_type_page(url, body_type)
+            
+            for model_name in models:
+                if model_name not in self.body_type_cache:
+                    self.body_type_cache[model_name] = []
+                if body_type not in self.body_type_cache[model_name]:
+                    self.body_type_cache[model_name].append(body_type)
+            
+            time.sleep(1)  # Rate limiting
+        
+        self._save_body_type_cache()
+        print(f"Body type cache built with {len(self.body_type_cache)} models")
+    
+    def _scrape_body_type_page(self, url: str, body_type: str) -> List[str]:
+        """特定のボディタイプページから車種名を取得"""
+        models = []
+        page = 1
+        max_pages = 10  # 安全のため最大ページ数を設定
+        
+        while page <= max_pages:
+            try:
+                page_url = url if page == 1 else f"{url}&page={page}"
+                resp = self.session.get(page_url, timeout=30)
+                
+                if resp.status_code != 200:
+                    break
+                
+                soup = BeautifulSoup(resp.text, 'lxml')
+                
+                # モデル名を取得 (h3.card-compact__title)
+                model_cards = soup.find_all('h3', class_='card-compact__title')
+                
+                if not model_cards:
+                    break
+                
+                for card in model_cards:
+                    model_name = card.get_text(strip=True)
+                    if model_name:
+                        models.append(model_name)
+                
+                # 次のページがあるかチェック
+                next_link = soup.find('a', {'data-car-chooser--filters-page-url-value': re.compile(f'page={page+1}')})
+                if not next_link:
+                    break
+                
+                page += 1
+                time.sleep(0.5)  # Rate limiting
+                
+            except Exception as e:
+                print(f"    Error scraping body type page {page}: {e}")
+                break
+        
+        return models
+    
+    def _get_body_types_for_model(self, model_name: str, slug: str) -> List[str]:
+        """モデル名からボディタイプを取得"""
+        # キャッシュが空の場合は構築
+        if not self.body_type_cache:
+            self._build_body_type_cache()
+        
+        # 完全一致を試みる
+        if model_name in self.body_type_cache:
+            return self.body_type_cache[model_name]
+        
+        # 部分一致を試みる（モデル名のバリエーションに対応）
+        model_words = model_name.lower().split()
+        for cached_model, body_types in self.body_type_cache.items():
+            cached_words = cached_model.lower().split()
+            # 主要な単語が一致するかチェック
+            if len(set(model_words) & set(cached_words)) >= min(len(model_words), len(cached_words)) - 1:
+                return body_types
+        
+        # メーカー名を除いたモデル名で再検索
+        if '/' in slug:
+            maker_slug = slug.split('/')[0]
+            maker_name = maker_slug.replace('-', ' ').title()
+            short_model = model_name.replace(maker_name, '').strip()
+            
+            if short_model and short_model in self.body_type_cache:
+                return self.body_type_cache[short_model]
+        
+        # 見つからない場合は空リストを返す
+        return []
     
     def scrape_vehicle(self, slug: str) -> Optional[Dict]:
         """車両データを取得"""
@@ -47,8 +172,8 @@ class CarwowScraper:
         # カラー情報の取得
         colors = self._scrape_colors(slug)
         
-        # ボディタイプの取得（TODO: Seleniumで実装予定）
-        body_types = self._get_fallback_body_types(model_en)
+        # ボディタイプの取得（実装済み）
+        body_types = self._get_body_types_for_model(model_en, slug)
         
         return {
             'slug': slug,
@@ -60,7 +185,7 @@ class CarwowScraper:
             'specifications': specs_data.get('specifications', {}),
             'colors': colors,
             'media_urls': media_urls,
-            'body_types': body_types,
+            'body_types': body_types if body_types else [],  # 空の場合は空リスト
             'catalog_url': main_url
         }
     
@@ -251,7 +376,7 @@ class CarwowScraper:
         
         for section in sections:
             # グレード名を取得
-            grade_name = 'Standard'
+            grade_name = 'Information not available'  # デフォルトを統一
             grade_elem = section.find('span', class_='trim-article__title-part-2')
             if grade_elem:
                 grade_name = grade_elem.get_text(strip=True)
@@ -259,12 +384,12 @@ class CarwowScraper:
             # このセクション内のエンジン情報を全て取得
             engine_divs = section.find_all('div', class_='specification-breakdown__title')
             
-            # エンジン情報が見つからない場合はスキップ（N/Aレコードを作らない）
+            # エンジン情報が見つからない場合
             if not engine_divs:
                 # ただし、セクション内に価格やその他の情報がある場合は1つだけ作成
                 section_text = section.get_text()
-                if 'RRP' in section_text and grade_name != 'Standard':
-                    # エンジン情報なしでも価格がある場合は1レコード作成
+                if 'RRP' in section_text or grade_name != 'Information not available':
+                    # エンジン情報なしでも1レコード作成
                     combo_key = f"{grade_name}_NO_ENGINE"
                     if combo_key not in processed_combinations:
                         grade_info = self._create_grade_info(section, grade_name, 'Information not available')
@@ -275,7 +400,7 @@ class CarwowScraper:
             for engine_div in engine_divs:
                 engine_text = engine_div.get_text(strip=True)
                 if not engine_text:
-                    continue
+                    engine_text = 'Information not available'
                 
                 # 重複チェック
                 combo_key = f"{grade_name}_{engine_text}"
@@ -285,7 +410,7 @@ class CarwowScraper:
                     new_info = self._create_grade_info(section, grade_name, engine_text)
                     # 空の値を新しい値で更新
                     for key, value in new_info.items():
-                        if not existing.get(key) and value:
+                        if (not existing.get(key) or existing.get(key) == 'Information not available') and value and value != 'Information not available':
                             existing[key] = value
                 else:
                     # 新規作成
@@ -298,12 +423,12 @@ class CarwowScraper:
         # データが全く見つからない場合のフォールバック（1レコードのみ）
         if not grades_engines:
             default_grade = {
-                'grade': 'Standard',
+                'grade': 'Information not available',
                 'engine': 'Information not available',
                 'engine_price_gbp': None,
-                'fuel': '',
-                'transmission': '',
-                'drive_type': '',
+                'fuel': 'Information not available',
+                'transmission': 'Information not available',
+                'drive_type': 'Information not available',
                 'power_bhp': None
             }
             grades_engines.append(default_grade)
@@ -313,12 +438,12 @@ class CarwowScraper:
     def _create_grade_info(self, section, grade_name: str, engine_text: str) -> Dict:
         """グレード情報を作成"""
         grade_info = {
-            'grade': grade_name,
-            'engine': engine_text,
+            'grade': grade_name if grade_name else 'Information not available',
+            'engine': engine_text if engine_text else 'Information not available',
             'engine_price_gbp': None,
-            'fuel': '',
-            'transmission': '',
-            'drive_type': '',
+            'fuel': 'Information not available',
+            'transmission': 'Information not available',
+            'drive_type': 'Information not available',
             'power_bhp': None
         }
         
@@ -348,7 +473,7 @@ class CarwowScraper:
                 item_text = item.get_text(strip=True)
                 
                 # トランスミッション
-                if not grade_info['transmission']:
+                if grade_info['transmission'] == 'Information not available':
                     if 'Automatic' in item_text:
                         grade_info['transmission'] = 'Automatic'
                     elif 'Manual' in item_text:
@@ -359,7 +484,7 @@ class CarwowScraper:
                         grade_info['transmission'] = 'DCT'
                 
                 # 駆動方式
-                if 'wheel drive' in item_text.lower() and not grade_info['drive_type']:
+                if 'wheel drive' in item_text.lower() and grade_info['drive_type'] == 'Information not available':
                     grade_info['drive_type'] = item_text
                 
                 # パワー
@@ -369,12 +494,12 @@ class CarwowScraper:
                         grade_info['power_bhp'] = int(bhp_match.group(1))
         
         # 燃料タイプをエンジン情報から推測
-        if engine_text:
+        if engine_text and engine_text != 'Information not available':
             engine_lower = engine_text.lower()
             if 'kwh' in engine_lower or 'electric' in engine_lower:
                 grade_info['fuel'] = 'Electric'
                 # 電気自動車は通常オートマチック
-                if not grade_info['transmission']:
+                if grade_info['transmission'] == 'Information not available':
                     grade_info['transmission'] = 'Automatic'
             elif 'diesel' in engine_lower:
                 grade_info['fuel'] = 'Diesel'
@@ -391,11 +516,11 @@ class CarwowScraper:
             list_items = category_list.find_all('li', class_='specification-breakdown__category-list-item')
             for item in list_items:
                 item_text = item.get_text(strip=True).lower()
-                if 'petrol' in item_text and not grade_info['fuel']:
+                if 'petrol' in item_text and grade_info['fuel'] == 'Information not available':
                     grade_info['fuel'] = 'Petrol'
-                elif 'diesel' in item_text and not grade_info['fuel']:
+                elif 'diesel' in item_text and grade_info['fuel'] == 'Information not available':
                     grade_info['fuel'] = 'Diesel'
-                elif 'electric' in item_text and not grade_info['fuel']:
+                elif 'electric' in item_text and grade_info['fuel'] == 'Information not available':
                     grade_info['fuel'] = 'Electric'
         
         return grade_info
@@ -459,15 +584,6 @@ class CarwowScraper:
         
         return colors
     
-    def _get_fallback_body_types(self, model_name: str) -> List[str]:
-        """
-        フォールバック：モデル名から推測
-        TODO: Seleniumでcar-chooserから正確に取得する実装に置き換え
-        """
-        # 現時点ではフォールバックとして簡易的な推測のみ
-        # 実際の実装ではSeleniumを使用してcar-chooserページから取得
-        return ['Information pending']  # 明示的に未取得であることを示す
-    
     def _extract_specs_from_main(self, slug: str) -> Dict:
         """メインページから仕様を抽出（specificationsページがない場合）"""
         try:
@@ -480,14 +596,14 @@ class CarwowScraper:
             soup = BeautifulSoup(main_resp.text, 'lxml')
             text = soup.get_text()
             
-            # デフォルトグレードを作成（最小限の情報のみ）
+            # デフォルトグレードを作成（統一された値）
             grade_info = {
-                'grade': 'Standard',
+                'grade': 'Information not available',
                 'engine': 'Information not available',
                 'engine_price_gbp': None,
-                'fuel': '',
-                'transmission': '',
-                'drive_type': '',
+                'fuel': 'Information not available',
+                'transmission': 'Information not available',
+                'drive_type': 'Information not available',
                 'power_bhp': None
             }
             
@@ -503,99 +619,3 @@ class CarwowScraper:
             
         except:
             return {'grades_engines': [], 'specifications': {}}
-    
-    def get_all_makers(self) -> List[str]:
-        """brandsページからメーカー一覧を取得"""
-        makers = []
-        
-        try:
-            resp = self.session.get(f"{BASE_URL}/brands", timeout=30)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'lxml')
-                
-                for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
-                    brand_name = brand_div.get_text(strip=True).lower()
-                    brand_slug = brand_name.replace(' ', '-')
-                    if brand_slug and brand_slug not in makers:
-                        makers.append(brand_slug)
-                
-                if not makers:
-                    for link in soup.find_all('a', href=True):
-                        href = link['href']
-                        if href.startswith('/') and href.count('/') == 1:
-                            maker = href[1:]
-                            if maker and not any(x in maker for x in ['brands', 'news', 'reviews']):
-                                if maker not in makers:
-                                    makers.append(maker)
-        except:
-            pass
-        
-        if not makers:
-            makers = [
-                'abarth', 'alfa-romeo', 'alpine', 'aston-martin', 'audi',
-                'bentley', 'bmw', 'byd', 'citroen', 'cupra', 'dacia', 'ds',
-                'fiat', 'ford', 'genesis', 'honda', 'hyundai', 'jaguar',
-                'jeep', 'kia', 'land-rover', 'lexus', 'lotus', 'mazda',
-                'mercedes-benz', 'mg', 'mini', 'nissan', 'peugeot', 'polestar',
-                'porsche', 'renault', 'seat', 'skoda', 'smart', 'subaru',
-                'suzuki', 'tesla', 'toyota', 'vauxhall', 'volkswagen', 'volvo'
-            ]
-        
-        return sorted(makers)
-    
-    def get_models_for_maker(self, maker: str) -> List[str]:
-        """メーカーページからモデル一覧を取得"""
-        models = []
-        seen = set()
-        
-        try:
-            url = f"{BASE_URL}/{maker}"
-            resp = self.session.get(url, timeout=30)
-            
-            if resp.status_code != 200:
-                return models
-            
-            soup = BeautifulSoup(resp.text, 'lxml')
-            
-            articles = soup.find_all('article', class_='card-compact')
-            
-            for article in articles:
-                for link in article.find_all('a', href=True):
-                    href = link['href']
-                    if f'/{maker}/' in href:
-                        if 'carwow.co.uk' in href:
-                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
-                        else:
-                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
-                        
-                        if len(parts) >= 2 and parts[0] == maker:
-                            model_slug = f"{parts[0]}/{parts[1]}"
-                            if model_slug not in seen:
-                                models.append(model_slug)
-                                seen.add(model_slug)
-                                break
-            
-            if not models:
-                all_links = soup.find_all('a', href=True)
-                
-                for link in all_links:
-                    href = link['href']
-                    if f'/{maker}/' in href:
-                        if any(skip in href for skip in ['/news/', '/reviews/', '/colours', '/specifications']):
-                            continue
-                        
-                        if 'carwow.co.uk' in href:
-                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
-                        else:
-                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
-                        
-                        if len(parts) >= 2 and parts[0] == maker:
-                            model_slug = f"{parts[0]}/{parts[1]}"
-                            if model_slug not in seen:
-                                models.append(model_slug)
-                                seen.add(model_slug)
-                                
-        except Exception as e:
-            print(f"    Error getting models for {maker}: {e}")
-        
-        return models
