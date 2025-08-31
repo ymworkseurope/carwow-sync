@@ -464,7 +464,7 @@ class CarwowScraper:
             self._save_body_type_cache()
         
         # セッションのクローズ
-        self.session.close() grades_engines,
+        self.session.close()
                 'specifications': specifications
             }
             
