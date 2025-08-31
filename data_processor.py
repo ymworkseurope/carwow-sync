@@ -1,18 +1,167 @@
 #!/usr/bin/env python3
 """
-data_processor.py - データ処理モジュール
+data_processor.py - データ処理モジュール（為替API・DeepL対応版）
 エンジン単位でレコードを生成
 """
 import re
 import json
+import os
+import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+import requests
+
+class ExchangeRateAPI:
+    """為替レートAPI管理クラス"""
+    
+    def __init__(self):
+        self.cache_file = 'exchange_rate_cache.json'
+        self.cache_duration = 3600  # 1時間キャッシュ
+        self.rate = None
+        self._load_cached_rate()
+    
+    def _load_cached_rate(self):
+        """キャッシュされた為替レートを読み込み"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r') as f:
+                    cache = json.load(f)
+                    if time.time() - cache.get('timestamp', 0) < self.cache_duration:
+                        self.rate = cache.get('rate')
+                        print(f"Using cached exchange rate: 1 GBP = {self.rate} JPY")
+            except:
+                pass
+    
+    def get_rate(self) -> float:
+        """GBPからJPYへの為替レートを取得"""
+        if self.rate:
+            return self.rate
+        
+        try:
+            # 無料の為替APIを使用 (exchangerate-api.com)
+            response = requests.get(
+                'https://api.exchangerate-api.com/v4/latest/GBP',
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self.rate = data['rates']['JPY']
+                
+                # キャッシュに保存
+                with open(self.cache_file, 'w') as f:
+                    json.dump({
+                        'rate': self.rate,
+                        'timestamp': time.time()
+                    }, f)
+                
+                print(f"Fetched exchange rate: 1 GBP = {self.rate} JPY")
+                return self.rate
+        except Exception as e:
+            print(f"Error fetching exchange rate: {e}")
+        
+        # フォールバック値
+        self.rate = 185.0
+        print(f"Using fallback exchange rate: 1 GBP = {self.rate} JPY")
+        return self.rate
+
+class DeepLTranslator:
+    """DeepL翻訳クラス"""
+    
+    def __init__(self):
+        self.api_key = os.getenv('DEEPL_KEY')
+        self.enabled = bool(self.api_key)
+        self.cache = {}
+        self.cache_file = 'translation_cache.json'
+        self._load_cache()
+        
+        if not self.enabled:
+            print("Warning: DeepL API key not configured")
+    
+    def _load_cache(self):
+        """翻訳キャッシュを読み込み"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r') as f:
+                    self.cache = json.load(f)
+            except:
+                self.cache = {}
+    
+    def _save_cache(self):
+        """翻訳キャッシュを保存"""
+        try:
+            with open(self.cache_file, 'w') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+    
+    def translate(self, text: str, target_lang: str = 'JA') -> str:
+        """テキストを翻訳"""
+        if not self.enabled or not text or text == 'Information not available':
+            return text
+        
+        # キャッシュチェック
+        cache_key = f"{text}_{target_lang}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        try:
+            # DeepL API Free版のエンドポイント
+            url = 'https://api-free.deepl.com/v2/translate'
+            
+            params = {
+                'auth_key': self.api_key,
+                'text': text,
+                'target_lang': target_lang
+            }
+            
+            response = requests.post(url, data=params, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()
+                translated = result['translations'][0]['text']
+                
+                # キャッシュに保存
+                self.cache[cache_key] = translated
+                self._save_cache()
+                
+                return translated
+            else:
+                print(f"DeepL API error: {response.status_code}")
+                return text
+                
+        except Exception as e:
+            print(f"Translation error: {e}")
+            return text
+    
+    def translate_colors(self, colors: List[str], existing_map: Dict[str, str]) -> List[str]:
+        """色名を翻訳（既存のマッピングを優先）"""
+        if not colors or colors == ['Information not available']:
+            return ['ー']
+        
+        translated = []
+        for color in colors:
+            # 既存のマッピングをチェック
+            ja_color = color
+            for en_word, ja_word in existing_map.items():
+                if en_word.lower() in color.lower():
+                    ja_color = color.lower().replace(en_word.lower(), ja_word)
+                    break
+            
+            # マッピングで翻訳されなかった場合はDeepL使用
+            if ja_color == color and self.enabled:
+                ja_color = self.translate(color)
+            
+            translated.append(ja_color)
+        
+        return translated
 
 class DataProcessor:
     """データ処理クラス"""
     
     def __init__(self):
-        self.gbp_to_jpy = 185
+        self.exchange_api = ExchangeRateAPI()
+        self.translator = DeepLTranslator()
+        self.gbp_to_jpy = self.exchange_api.get_rate()
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
     
@@ -64,7 +213,7 @@ class DataProcessor:
                 record['price_min_gbp'] = grade_engine['price_min_gbp']
                 record['price_min_jpy'] = int(grade_engine['price_min_gbp'] * self.gbp_to_jpy)
             
-            record = self._add_japanese_fields(record)
+            record = self._add_japanese_fields(record, raw_data)
             
             parts = [record['make_ja'], record['model_ja']]
             if record['grade'] and record['grade'] != self.na_value:
@@ -113,12 +262,17 @@ class DataProcessor:
         specs = raw_data.get('specifications', {})
         prices = raw_data.get('prices', {})
         
+        # body_typeの処理
+        body_types = raw_data.get('body_types', [])
+        if not body_types or body_types == ['Information not available']:
+            body_types = ['Information not available']
+        
         base = {
             'slug': raw_data.get('slug', ''),
             'make_en': raw_data.get('make_en', ''),
             'model_en': raw_data.get('model_en', ''),
             'overview_en': raw_data.get('overview_en', ''),
-            'body_type': raw_data.get('body_types', []),
+            'body_type': body_types,
             'colors': self.na_value if not raw_data.get('colors') else raw_data.get('colors', []),
             'media_urls': raw_data.get('media_urls', []),
             'catalog_url': raw_data.get('catalog_url', ''),
@@ -130,6 +284,7 @@ class DataProcessor:
             'price_used_gbp': self.na_value if prices.get('price_used_gbp') is None else prices.get('price_used_gbp'),
         }
         
+        # 為替レートを使用して日本円価格を計算
         if base['price_min_gbp'] != self.na_value:
             base['price_min_jpy'] = int(base['price_min_gbp'] * self.gbp_to_jpy)
         else:
@@ -147,9 +302,10 @@ class DataProcessor:
         
         return base
     
-    def _add_japanese_fields(self, record: Dict) -> Dict:
-        """日本語フィールドを追加"""
+    def _add_japanese_fields(self, record: Dict, raw_data: Dict) -> Dict:
+        """日本語フィールドを追加（DeepL統合版）"""
         
+        # メーカー名のマッピング
         make_ja_map = {
             'Abarth': 'アバルト',
             'Alfa Romeo': 'アルファロメオ',
@@ -215,22 +371,38 @@ class DataProcessor:
         record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
         record['model_ja'] = record['model_en']
         
+        # body_type_jaのマッピング（DeepLではなくマッピングを使用）
         body_type_ja_map = {
-            'Convertible': 'コンバーチブル',
             'SUV': 'SUV',
+            'SUVs': 'SUV',
             'Hatchback': 'ハッチバック',
+            'Hatchbacks': 'ハッチバック',
             'Saloon': 'セダン',
+            'Saloons': 'セダン',
             'Estate': 'ステーションワゴン',
+            'Estate cars': 'ステーションワゴン',
             'Coupe': 'クーペ',
+            'Coupes': 'クーペ',
             'Sports Car': 'スポーツカー',
+            'Sports cars': 'スポーツカー',
             'People Carrier': 'ミニバン',
-            'Electric': '電気自動車'
+            'People carriers': 'ミニバン',
+            'Convertible': 'カブリオレ',
+            'Convertibles': 'カブリオレ',
+            'Electric': '電気自動車',
+            'Information not available': 'ー'
         }
         
-        record['body_type_ja'] = [
-            body_type_ja_map.get(bt, bt) for bt in record.get('body_type', [])
-        ]
+        body_types = record.get('body_type', [])
+        if not body_types or body_types == ['Information not available']:
+            record['body_type_ja'] = ['ー']
+        else:
+            record['body_type_ja'] = [
+                body_type_ja_map.get(bt, body_type_ja_map.get(bt + 's', bt)) 
+                for bt in body_types
+            ]
         
+        # 燃料タイプの翻訳
         fuel_ja_map = {
             'Petrol': 'ガソリン',
             'Diesel': 'ディーゼル',
@@ -241,6 +413,7 @@ class DataProcessor:
         }
         record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), self.dash_value)
         
+        # トランスミッションの翻訳
         trans_ja_map = {
             'Automatic': 'オートマチック',
             'Manual': 'マニュアル',
@@ -259,6 +432,7 @@ class DataProcessor:
         else:
             record['transmission_ja'] = trans_ja_map.get(trans, self.dash_value)
         
+        # ドライブタイプの翻訳
         drive_ja_map = {
             'Front-wheel drive': 'FF',
             'Rear-wheel drive': 'FR',
@@ -279,6 +453,7 @@ class DataProcessor:
         else:
             record['drive_type_ja'] = drive_ja_map.get(drive, self.dash_value)
         
+        # カラーの翻訳（既存マッピング優先、DeepL併用）
         color_ja_map = {
             'White': 'ホワイト',
             'Black': 'ブラック',
@@ -299,23 +474,20 @@ class DataProcessor:
         if colors == self.na_value or not colors:
             record['colors_ja'] = self.dash_value
         else:
-            colors_ja = []
-            for color in colors:
-                ja_color = color
-                for en, ja in color_ja_map.items():
-                    if en.lower() in color.lower():
-                        ja_color = color.replace(en, ja)
-                        break
-                colors_ja.append(ja_color)
-            record['colors_ja'] = colors_ja
+            record['colors_ja'] = self.translator.translate_colors(colors, color_ja_map)
         
+        # 寸法の日本語フォーマット
         if record.get('dimensions_mm') and record['dimensions_mm'] != self.na_value:
             record['dimensions_ja'] = self._format_dimensions_ja(record['dimensions_mm'])
         else:
             record['dimensions_ja'] = self.dash_value
         
-        if not record.get('overview_ja'):
-            record['overview_ja'] = record.get('overview_en', '')
+        # overview_jaをDeepLで翻訳
+        overview_en = record.get('overview_en', '')
+        if overview_en and overview_en != self.na_value:
+            record['overview_ja'] = self.translator.translate(overview_en)
+        else:
+            record['overview_ja'] = self.dash_value
         
         return record
     
@@ -327,7 +499,8 @@ class DataProcessor:
             'body_types': raw_data.get('body_types', []),
             'available_colors': raw_data.get('colors', []),
             'media_count': len(raw_data.get('media_urls', [])),
-            'scrape_date': datetime.now().isoformat()
+            'scrape_date': datetime.now().isoformat(),
+            'exchange_rate_gbp_to_jpy': self.gbp_to_jpy
         }
         
         engine_text = grade_engine.get('engine', '')
