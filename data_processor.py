@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 data_processor.py - データ処理モジュール（改良版）
-エンジン単位でレコードを生成
+エンジン単位でレコードを生成、統一された"Information not available"処理
 """
 import re
 import json
@@ -13,6 +13,7 @@ class DataProcessor:
     
     def __init__(self):
         self.gbp_to_jpy = 185  # 為替レート
+        self.na_value = 'Information not available'  # 統一された未取得値
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
@@ -31,26 +32,26 @@ class DataProcessor:
         if not grades_engines:
             # データがない場合はデフォルトレコードを作成
             grades_engines = [{
-                'grade': 'Standard',
-                'engine': 'N/A',
-                'price_min_gbp': None,
-                'fuel': 'N/A',
-                'transmission': 'N/A',
-                'drive_type': 'N/A',
+                'grade': self.na_value,
+                'engine': self.na_value,
+                'engine_price_gbp': None,
+                'fuel': self.na_value,
+                'transmission': self.na_value,
+                'drive_type': self.na_value,
                 'power_bhp': None
             }]
         
         for grade_engine in grades_engines:
             record = base_data.copy()
             
-            # グレード・エンジン情報
-            record['grade'] = grade_engine.get('grade', 'Standard')
-            record['engine'] = grade_engine.get('engine', 'N/A')
+            # グレード・エンジン情報（統一された値チェック）
+            record['grade'] = self._normalize_value(grade_engine.get('grade'), self.na_value)
+            record['engine'] = self._normalize_value(grade_engine.get('engine'), self.na_value)
             
-            # 各種仕様
-            record['fuel'] = grade_engine.get('fuel', 'N/A')
-            record['transmission'] = grade_engine.get('transmission', 'N/A')
-            record['drive_type'] = grade_engine.get('drive_type', 'N/A')
+            # 各種仕様（統一された値チェック）
+            record['fuel'] = self._normalize_value(grade_engine.get('fuel'), self.na_value)
+            record['transmission'] = self._normalize_value(grade_engine.get('transmission'), self.na_value)
+            record['drive_type'] = self._normalize_value(grade_engine.get('drive_type'), self.na_value)
             record['power_bhp'] = grade_engine.get('power_bhp')
             
             # エンジンごとの価格（新しい列）
@@ -71,10 +72,13 @@ class DataProcessor:
             
             # full_model_jaを生成（make_ja + model_ja + grade + engine）
             parts = [record['make_ja'], record['model_ja']]
-            if record['grade'] and record['grade'] not in ['Standard', 'N/A']:
+            if record['grade'] and record['grade'] != self.na_value:
                 parts.append(record['grade'])
-            if record['engine'] and record['engine'] != 'N/A':
-                parts.append(record['engine'])
+            if record['engine'] and record['engine'] != self.na_value:
+                # エンジン情報を短縮して追加
+                engine_short = self._shorten_engine_text(record['engine'])
+                if engine_short:
+                    parts.append(engine_short)
             record['full_model_ja'] = ' '.join(parts)
             
             # spec_jsonフィールドに詳細情報を格納
@@ -90,6 +94,34 @@ class DataProcessor:
             records.append(record)
         
         return records
+    
+    def _normalize_value(self, value: Any, default: str) -> str:
+        """値を正規化（空値、N/A、Standard等を統一）"""
+        if value is None or value == '' or value == 'N/A' or value == '-':
+            return default
+        if value == 'Standard' and default == self.na_value:
+            return default
+        return str(value)
+    
+    def _shorten_engine_text(self, engine_text: str) -> str:
+        """エンジンテキストを短縮"""
+        if engine_text == self.na_value:
+            return ''
+        
+        # 例: "2.0L Petrol 200bhp" -> "2.0L"
+        match = re.search(r'(\d+\.?\d*)\s*[Ll]', engine_text)
+        if match:
+            return match.group(0)
+        
+        # 電気自動車の場合
+        if 'kWh' in engine_text:
+            match = re.search(r'([\d.]+)\s*kWh', engine_text)
+            if match:
+                return f"{match.group(1)}kWh"
+        
+        # その他の場合は最初の単語のみ
+        words = engine_text.split()
+        return words[0] if words else ''
     
     def _extract_base_data(self, raw_data: Dict) -> Dict:
         """基本データを抽出"""
@@ -120,10 +152,18 @@ class DataProcessor:
         # 日本円価格を計算
         if base['price_min_gbp']:
             base['price_min_jpy'] = int(base['price_min_gbp'] * self.gbp_to_jpy)
+        else:
+            base['price_min_jpy'] = None
+            
         if base['price_max_gbp']:
             base['price_max_jpy'] = int(base['price_max_gbp'] * self.gbp_to_jpy)
+        else:
+            base['price_max_jpy'] = None
+            
         if base['price_used_gbp']:
             base['price_used_jpy'] = int(base['price_used_gbp'] * self.gbp_to_jpy)
+        else:
+            base['price_used_jpy'] = None
         
         return base
     
@@ -159,12 +199,14 @@ class DataProcessor:
             'Mercedes-Benz': 'メルセデス・ベンツ',
             'MG': 'MG',
             'MINI': 'ミニ',
+            'Mini': 'ミニ',
             'Nissan': '日産',
             'Peugeot': 'プジョー',
             'Polestar': 'ポールスター',
             'Porsche': 'ポルシェ',
             'Renault': 'ルノー',
             'SEAT': 'セアト',
+            'Seat': 'セアト',
             'Skoda': 'シュコダ',
             'Smart': 'スマート',
             'Subaru': 'スバル',
@@ -203,9 +245,9 @@ class DataProcessor:
             'Electric': '電気',
             'Hybrid': 'ハイブリッド',
             'Plug-in Hybrid': 'プラグインハイブリッド',
-            'N/A': '不明'
+            self.na_value: '不明'
         }
-        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', 'N/A'), record.get('fuel', ''))
+        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), record.get('fuel', ''))
         
         # トランスミッションの日本語変換
         trans_ja_map = {
@@ -213,7 +255,7 @@ class DataProcessor:
             'Manual': 'マニュアル',
             'CVT': 'CVT',
             'DCT': 'DCT',
-            'N/A': '不明'
+            self.na_value: '不明'
         }
         
         # トランスミッションが文章形式の場合も処理
@@ -231,7 +273,7 @@ class DataProcessor:
             'Rear-wheel drive': '後輪駆動',
             'All-wheel drive': '全輪駆動',
             'Four-wheel drive': '4WD',
-            'N/A': '不明'
+            self.na_value: '不明'
         }
         
         # 駆動方式が文章形式の場合も処理
@@ -278,6 +320,8 @@ class DataProcessor:
         # 寸法の日本語説明
         if record.get('dimensions_mm'):
             record['dimensions_ja'] = f"寸法: {record['dimensions_mm']}"
+        else:
+            record['dimensions_ja'] = ''
         
         # 概要の翻訳プレースホルダー
         if not record.get('overview_ja'):
@@ -298,7 +342,7 @@ class DataProcessor:
         
         # エンジン情報の詳細パース
         engine_text = grade_engine.get('engine', '')
-        if engine_text and engine_text != 'N/A':
+        if engine_text and engine_text != self.na_value:
             spec_json['engine_parsed'] = self._parse_engine_details(engine_text)
         
         # 追加の仕様情報
@@ -307,7 +351,8 @@ class DataProcessor:
             spec_json['additional_specs'] = {
                 'boot_capacity_l': specs.get('boot_capacity_l'),
                 'wheelbase_m': specs.get('wheelbase_m'),
-                'turning_circle_m': specs.get('turning_circle_m')
+                'turning_circle_m': specs.get('turning_circle_m'),
+                'battery_capacity_kwh': specs.get('battery_capacity_kwh')
             }
         
         return spec_json
@@ -315,6 +360,10 @@ class DataProcessor:
     def _parse_engine_details(self, engine_text: str) -> Dict:
         """エンジン情報を詳細にパース"""
         details = {}
+        
+        # Information not availableの場合は空の辞書を返す
+        if engine_text == self.na_value:
+            return details
         
         # 電気自動車の場合（kW/kWh形式）
         electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
