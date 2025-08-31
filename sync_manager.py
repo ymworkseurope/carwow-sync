@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 完全版（新しいヘッダー対応）
+sync_manager.py - 完全版（為替API・DeepL対応）
 実行管理とデータベース・スプレッドシート同期モジュール
 """
 import os
@@ -29,8 +29,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GS_CREDS_JSON = os.getenv("GS_CREDS_JSON")
 GS_SHEET_ID = os.getenv("GS_SHEET_ID")
+DEEPL_KEY = os.getenv("DEEPL_KEY")  # DeepL APIキーを環境変数から取得
 
-# Google Sheets設定（spec_json重複を削除）
+# Google Sheets設定
 SHEET_NAME = "system_cars"
 SHEET_HEADERS = [
     "id", "slug", "make_en", "model_en", "make_ja", "model_ja",
@@ -94,14 +95,18 @@ class SupabaseManager:
         clean = {}
         
         for key, value in payload.items():
-            # None、'-'、'N/A'の値は除外
-            if value is None or value in ['-', 'N/A']:
+            # None、'-'、'N/A'、'ー'の値は除外
+            if value is None or value in ['-', 'N/A', 'ー']:
                 continue
             
             # 配列型のフィールド
             if key in ['body_type', 'body_type_ja', 'colors', 'colors_ja', 'media_urls']:
                 if isinstance(value, list):
-                    clean[key] = value
+                    # "Information not available"を含む場合は空配列にする
+                    if value == ['Information not available'] or value == ['ー']:
+                        clean[key] = []
+                    else:
+                        clean[key] = value
                 else:
                     clean[key] = []
             
@@ -110,27 +115,37 @@ class SupabaseManager:
                 if isinstance(value, dict):
                     clean_spec = {}
                     for k, v in value.items():
-                        if v not in ['-', 'N/A']:
+                        if v not in ['-', 'N/A', 'ー']:
                             clean_spec[k] = v
                     clean[key] = clean_spec
                 else:
                     clean[key] = {}
             
-            # 数値型のフィールド
+            # 数値型のフィールド（"Information not available"をスキップ）
             elif key in ['price_min_gbp', 'price_max_gbp', 'price_used_gbp',
                         'price_min_jpy', 'price_max_jpy', 'price_used_jpy',
                         'engine_price_gbp', 'engine_price_jpy']:
-                if value is not None:
-                    clean[key] = float(value)
+                if value not in ['Information not available', 'ー'] and value is not None:
+                    try:
+                        clean[key] = float(value)
+                    except (ValueError, TypeError):
+                        pass
             
-            # 整数型のフィールド  
+            # 整数型のフィールド
             elif key in ['doors', 'seats', 'power_bhp']:
-                if value is not None:
-                    clean[key] = int(value)
+                if value not in ['Information not available', 'ー'] and value is not None:
+                    try:
+                        clean[key] = int(value)
+                    except (ValueError, TypeError):
+                        pass
             
-            # その他はそのまま
+            # その他のフィールド（"Information not available"をNULLに変換）
             else:
-                clean[key] = value
+                if value == 'Information not available' or value == 'ー':
+                    # データベースではNULLとして扱う（キーを含めない）
+                    pass
+                else:
+                    clean[key] = value
         
         return clean
 
@@ -266,11 +281,14 @@ class GoogleSheetsManager:
             value = payload.get(header)
             
             # 値の変換
-            if value is None or value in ['-', 'N/A']:
+            if value is None or value in ['-', 'N/A', 'Information not available', 'ー']:
                 row_data.append('')
             elif isinstance(value, list):
                 # 配列は文字列結合
-                row_data.append(', '.join(str(v) for v in value))
+                if value == ['Information not available'] or value == ['ー']:
+                    row_data.append('')
+                else:
+                    row_data.append(', '.join(str(v) for v in value))
             elif isinstance(value, dict):
                 # 辞書はJSON文字列
                 row_data.append(json.dumps(value, ensure_ascii=False))
@@ -304,15 +322,15 @@ class GoogleSheetsManager:
                 start_row = len(existing_data) + 1
                 end_row = start_row + len(all_data) - 1
                 
-                # 範囲を計算（列数が多いのでAA以降も対応）
+                # 正しい列計算
                 num_cols = len(self.headers)
                 if num_cols <= 26:
-                    col_letter = chr(64 + num_cols)
+                    col_letter = chr(65 + num_cols - 1)  # A=1, B=2, ..., Z=26
                 else:
                     # AA, AB, AC...の形式（正しい計算）
-                    first_letter = 'A'
-                    second_letter = chr(64 + (num_cols - 26))
-                    col_letter = first_letter + second_letter
+                    first_letter_index = (num_cols - 1) // 26
+                    second_letter_index = (num_cols - 1) % 26
+                    col_letter = chr(65 + first_letter_index - 1) + chr(65 + second_letter_index)
                 
                 range_name = f"A{start_row}:{col_letter}{end_row}"
                 
@@ -345,10 +363,15 @@ class SyncManager:
         self.supabase = SupabaseManager()
         self.sheets = GoogleSheetsManager()
         
+        # DeepL APIキーの確認
+        if not os.getenv('DEEPL_KEY'):
+            print("Warning: DeepL API key not configured - translations will not be available")
+        
         self.stats = {
             'total': 0,
             'success': 0,
             'failed': 0,
+            'skipped': 0,  # リダイレクトでスキップされた数
             'records_saved': 0,
             'errors': []
         }
@@ -360,6 +383,8 @@ class SyncManager:
         print(f"Time: {datetime.now().isoformat()}")
         print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
         print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
+        print(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
+        print(f"Exchange Rate: Auto-fetching enabled")
         print("=" * 60)
         
         if makers is None:
@@ -400,6 +425,7 @@ class SyncManager:
         print(f"Syncing {len(slugs)} specific vehicles")
         print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
         print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
+        print(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
         print("=" * 60)
         
         for idx, slug in enumerate(slugs):
@@ -418,8 +444,8 @@ class SyncManager:
             raw_data = self.scraper.scrape_vehicle(slug)
             
             if not raw_data:
-                print("NO DATA")
-                self.stats['failed'] += 1
+                print("NO DATA (redirect or not found)")
+                self.stats['skipped'] += 1
                 return
             
             # データ処理（複数のレコードが返される）
@@ -446,9 +472,13 @@ class SyncManager:
             error_msg = str(e)
             if "404" in error_msg:
                 print("NOT FOUND")
+                self.stats['skipped'] += 1
+            elif "redirect" in error_msg.lower():
+                print("REDIRECT")
+                self.stats['skipped'] += 1
             else:
                 print(f"ERROR: {error_msg[:50]}")
-            self.stats['failed'] += 1
+                self.stats['failed'] += 1
             self.stats['errors'].append(f"{slug}: {error_msg}")
     
     def _print_statistics(self):
@@ -459,6 +489,7 @@ class SyncManager:
         print(f"Total vehicles processed: {self.stats['total']}")
         print(f"Successful: {self.stats['success']}")
         print(f"Failed: {self.stats['failed']}")
+        print(f"Skipped (redirects): {self.stats['skipped']}")
         print(f"Total records saved: {self.stats['records_saved']}")
         
         if self.stats['errors']:
@@ -525,6 +556,12 @@ Examples:
         help='Disable Google Sheets sync'
     )
     
+    parser.add_argument(
+        '--no-deepl',
+        action='store_true',
+        help='Disable DeepL translation'
+    )
+    
     args = parser.parse_args()
     
     # 環境変数の上書き
@@ -535,6 +572,9 @@ Examples:
     if args.no_sheets:
         os.environ['GS_CREDS_JSON'] = ''
         os.environ['GS_SHEET_ID'] = ''
+    
+    if args.no_deepl:
+        os.environ['DEEPL_KEY'] = ''
     
     if args.test:
         args.limit = 5
