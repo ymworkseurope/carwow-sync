@@ -14,6 +14,7 @@ class DataProcessor:
     def __init__(self):
         self.gbp_to_jpy = 185  # 為替レート
         self.na_value = 'Information not available'  # 統一された未取得値
+        self.dash_value = 'ー'  # 日本語での未取得値
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
@@ -52,15 +53,19 @@ class DataProcessor:
             record['fuel'] = self._normalize_value(grade_engine.get('fuel'), self.na_value)
             record['transmission'] = self._normalize_value(grade_engine.get('transmission'), self.na_value)
             record['drive_type'] = self._normalize_value(grade_engine.get('drive_type'), self.na_value)
-            record['power_bhp'] = grade_engine.get('power_bhp')
             
-            # エンジンごとの価格（新しい列）
-            if grade_engine.get('engine_price_gbp'):
-                record['engine_price_gbp'] = grade_engine['engine_price_gbp']
-                record['engine_price_jpy'] = int(grade_engine['engine_price_gbp'] * self.gbp_to_jpy)
+            # power_bhp（修正：Noneの場合はna_valueに）
+            power_bhp = grade_engine.get('power_bhp')
+            record['power_bhp'] = self.na_value if power_bhp is None else power_bhp
+            
+            # エンジンごとの価格（修正：Noneの場合はna_valueに）
+            engine_price_gbp = grade_engine.get('engine_price_gbp')
+            if engine_price_gbp is not None:
+                record['engine_price_gbp'] = engine_price_gbp
+                record['engine_price_jpy'] = int(engine_price_gbp * self.gbp_to_jpy)
             else:
-                record['engine_price_gbp'] = None
-                record['engine_price_jpy'] = None
+                record['engine_price_gbp'] = self.na_value
+                record['engine_price_jpy'] = self.dash_value
             
             # グレード別価格（フォールバック）
             if grade_engine.get('price_min_gbp'):
@@ -99,8 +104,7 @@ class DataProcessor:
         """値を正規化（空値、N/A、Standard等を統一）"""
         if value is None or value == '' or value == 'N/A' or value == '-':
             return default
-        if value == 'Standard' and default == self.na_value:
-            return default
+        # Standardをそのまま返すように修正（gradeでStandardは有効な値）
         return str(value)
     
     def _shorten_engine_text(self, engine_text: str) -> str:
@@ -138,32 +142,32 @@ class DataProcessor:
             'media_urls': raw_data.get('media_urls', []),
             'catalog_url': raw_data.get('catalog_url', ''),
             
-            # スペック
-            'doors': specs.get('doors'),
-            'seats': specs.get('seats'),
-            'dimensions_mm': specs.get('dimensions_mm', ''),
+            # スペック（修正：Noneの場合はna_valueに）
+            'doors': self.na_value if specs.get('doors') is None else specs.get('doors'),
+            'seats': self.na_value if specs.get('seats') is None else specs.get('seats'),
+            'dimensions_mm': self.na_value if not specs.get('dimensions_mm') else specs.get('dimensions_mm'),
             
-            # 価格（基本）
-            'price_min_gbp': prices.get('price_min_gbp'),
-            'price_max_gbp': prices.get('price_max_gbp'),
-            'price_used_gbp': prices.get('price_used_gbp'),
+            # 価格（修正：Noneの場合はna_valueに）
+            'price_min_gbp': self.na_value if prices.get('price_min_gbp') is None else prices.get('price_min_gbp'),
+            'price_max_gbp': self.na_value if prices.get('price_max_gbp') is None else prices.get('price_max_gbp'),
+            'price_used_gbp': self.na_value if prices.get('price_used_gbp') is None else prices.get('price_used_gbp'),
         }
         
-        # 日本円価格を計算
-        if base['price_min_gbp']:
+        # 日本円価格を計算（修正：元の値がna_valueの場合はdash_valueに）
+        if base['price_min_gbp'] != self.na_value:
             base['price_min_jpy'] = int(base['price_min_gbp'] * self.gbp_to_jpy)
         else:
-            base['price_min_jpy'] = None
+            base['price_min_jpy'] = self.dash_value
             
-        if base['price_max_gbp']:
+        if base['price_max_gbp'] != self.na_value:
             base['price_max_jpy'] = int(base['price_max_gbp'] * self.gbp_to_jpy)
         else:
-            base['price_max_jpy'] = None
+            base['price_max_jpy'] = self.dash_value
             
-        if base['price_used_gbp']:
+        if base['price_used_gbp'] != self.na_value:
             base['price_used_jpy'] = int(base['price_used_gbp'] * self.gbp_to_jpy)
         else:
-            base['price_used_jpy'] = None
+            base['price_used_jpy'] = self.dash_value
         
         return base
     
@@ -238,34 +242,36 @@ class DataProcessor:
             body_type_ja_map.get(bt, bt) for bt in record.get('body_type', [])
         ]
         
-        # 燃料タイプの日本語変換
+        # 燃料タイプの日本語変換（修正：na_valueの場合はdash_valueに）
         fuel_ja_map = {
             'Petrol': 'ガソリン',
             'Diesel': 'ディーゼル',
             'Electric': '電気',
             'Hybrid': 'ハイブリッド',
             'Plug-in Hybrid': 'プラグインハイブリッド',
-            self.na_value: '不明'
+            self.na_value: self.dash_value
         }
-        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), record.get('fuel', ''))
+        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), self.dash_value)
         
-        # トランスミッションの日本語変換
+        # トランスミッションの日本語変換（修正：na_valueの場合はdash_valueに）
         trans_ja_map = {
             'Automatic': 'オートマチック',
             'Manual': 'マニュアル',
             'CVT': 'CVT',
             'DCT': 'DCT',
-            self.na_value: '不明'
+            self.na_value: self.dash_value
         }
         
         # トランスミッションが文章形式の場合も処理
         trans = record.get('transmission', '')
-        if 'Automatic' in trans:
+        if trans == self.na_value:
+            record['transmission_ja'] = self.dash_value
+        elif 'Automatic' in trans:
             record['transmission_ja'] = 'オートマチック'
         elif 'Manual' in trans:
             record['transmission_ja'] = 'マニュアル'
         else:
-            record['transmission_ja'] = trans_ja_map.get(trans, trans)
+            record['transmission_ja'] = trans_ja_map.get(trans, self.dash_value)
         
         # 駆動方式の日本語変換
         drive_ja_map = {
@@ -317,11 +323,11 @@ class DataProcessor:
             colors_ja.append(ja_color)
         record['colors_ja'] = colors_ja
         
-        # 寸法の日本語説明
-        if record.get('dimensions_mm'):
+        # 寸法の日本語説明（修正：na_valueの場合はdash_valueに）
+        if record.get('dimensions_mm') and record['dimensions_mm'] != self.na_value:
             record['dimensions_ja'] = f"寸法: {record['dimensions_mm']}"
         else:
-            record['dimensions_ja'] = ''
+            record['dimensions_ja'] = self.dash_value
         
         # 概要の翻訳プレースホルダー
         if not record.get('overview_ja'):
