@@ -58,7 +58,7 @@ class SupabaseManager:
             print("Warning: Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT"""
+        """データをUPSERT（重複時は更新）"""
         if not self.enabled:
             return False
         
@@ -67,23 +67,48 @@ class SupabaseManager:
                 'apikey': self.key,
                 'Authorization': f'Bearer {self.key}',
                 'Content-Type': 'application/json',
-                'Prefer': 'resolution=merge-duplicates'
+                'Prefer': 'return=minimal'  # 返り値を最小化
             }
             
             # データ型の変換
             clean_payload = self._prepare_payload(payload)
             
+            # 最初にUPSERTを試みる
+            upsert_headers = headers.copy()
+            upsert_headers['Prefer'] = 'resolution=merge-duplicates,return=minimal'
+            
             response = requests.post(
                 f"{self.url}/rest/v1/cars",
-                headers=headers,
+                headers=upsert_headers,
                 json=clean_payload,
                 timeout=30
             )
             
-            if response.status_code in [200, 201]:
+            if response.status_code in [200, 201, 204]:
                 return True
+            elif response.status_code == 409:
+                # 重複エラーの場合はUPDATEを試みる
+                if 'slug' in clean_payload and 'grade' in clean_payload and 'engine' in clean_payload:
+                    update_url = f"{self.url}/rest/v1/cars"
+                    update_url += f"?slug=eq.{clean_payload['slug']}"
+                    update_url += f"&grade=eq.{clean_payload['grade']}"
+                    update_url += f"&engine=eq.{clean_payload['engine']}"
+                    
+                    update_response = requests.patch(
+                        update_url,
+                        headers=headers,
+                        json=clean_payload,
+                        timeout=30
+                    )
+                    
+                    if update_response.status_code in [200, 204]:
+                        return True
+                    else:
+                        print(f"Supabase update error {update_response.status_code}: {update_response.text[:200]}")
+                        return False
+                return False
             else:
-                print(f"Supabase error {response.status_code}: {response.text}")
+                print(f"Supabase error {response.status_code}: {response.text[:200]}")
                 return False
                 
         except Exception as e:
