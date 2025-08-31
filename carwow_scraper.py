@@ -354,117 +354,7 @@ class CarwowScraper:
             specifications = self._extract_basic_specs(specs_soup)
             
             return {
-                'grades_engines': [grade_info],
-                'specifications': {}
-            }
-            
-        except:
-            return {'grades_engines': [], 'specifications': {}}
-    
-    def get_all_makers(self) -> List[str]:
-        """brandsページからメーカー一覧を取得"""
-        makers = []
-        
-        try:
-            resp = self.session.get(f"{BASE_URL}/brands", timeout=30)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'lxml')
-                
-                for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
-                    brand_name = brand_div.get_text(strip=True).lower()
-                    brand_slug = brand_name.replace(' ', '-')
-                    if brand_slug and brand_slug not in makers:
-                        makers.append(brand_slug)
-                
-                if not makers:
-                    for link in soup.find_all('a', href=True):
-                        href = link['href']
-                        if href.startswith('/') and href.count('/') == 1:
-                            maker = href[1:]
-                            if maker and not any(x in maker for x in ['brands', 'news', 'reviews']):
-                                if maker not in makers:
-                                    makers.append(maker)
-        except:
-            pass
-        
-        if not makers:
-            makers = [
-                'abarth', 'alfa-romeo', 'alpine', 'aston-martin', 'audi',
-                'bentley', 'bmw', 'byd', 'citroen', 'cupra', 'dacia', 'ds',
-                'fiat', 'ford', 'genesis', 'honda', 'hyundai', 'jaguar',
-                'jeep', 'kia', 'land-rover', 'lexus', 'lotus', 'mazda',
-                'mercedes-benz', 'mg', 'mini', 'nissan', 'peugeot', 'polestar',
-                'porsche', 'renault', 'seat', 'skoda', 'smart', 'subaru',
-                'suzuki', 'tesla', 'toyota', 'vauxhall', 'volkswagen', 'volvo'
-            ]
-        
-        return sorted(makers)
-    
-    def get_models_for_maker(self, maker: str) -> List[str]:
-        """メーカーページからモデル一覧を取得"""
-        models = []
-        seen = set()
-        
-        try:
-            url = f"{BASE_URL}/{maker}"
-            resp = self.session.get(url, timeout=30)
-            
-            if resp.status_code != 200:
-                return models
-            
-            soup = BeautifulSoup(resp.text, 'lxml')
-            
-            articles = soup.find_all('article', class_='card-compact')
-            
-            for article in articles:
-                for link in article.find_all('a', href=True):
-                    href = link['href']
-                    if f'/{maker}/' in href:
-                        if 'carwow.co.uk' in href:
-                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
-                        else:
-                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
-                        
-                        if len(parts) >= 2 and parts[0] == maker:
-                            model_slug = f"{parts[0]}/{parts[1]}"
-                            if model_slug not in seen:
-                                models.append(model_slug)
-                                seen.add(model_slug)
-                                break
-            
-            if not models:
-                all_links = soup.find_all('a', href=True)
-                
-                for link in all_links:
-                    href = link['href']
-                    if f'/{maker}/' in href:
-                        if any(skip in href for skip in ['/news/', '/reviews/', '/colours', '/specifications']):
-                            continue
-                        
-                        if 'carwow.co.uk' in href:
-                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
-                        else:
-                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
-                        
-                        if len(parts) >= 2 and parts[0] == maker:
-                            model_slug = f"{parts[0]}/{parts[1]}"
-                            if model_slug not in seen:
-                                models.append(model_slug)
-                                seen.add(model_slug)
-                                
-        except Exception as e:
-            print(f"    Error getting models for {maker}: {e}")
-        
-        return models
-    
-    def cleanup(self):
-        """リソースのクリーンアップ"""
-        # キャッシュファイルの最終保存
-        if self.body_type_cache:
-            self._save_body_type_cache()
-        
-        # セッションのクローズ
-        self.session.close()
+                'grades_engines': grades_engines,
                 'specifications': specifications
             }
             
@@ -723,4 +613,114 @@ class CarwowScraper:
                 grade_info['transmission'] = 'Automatic'
             
             return {
-                'grades_engines':
+                'grades_engines': [grade_info],
+                'specifications': {}
+            }
+            
+        except:
+            return {'grades_engines': [], 'specifications': {}}
+    
+    def get_all_makers(self) -> List[str]:
+        """brandsページからメーカー一覧を取得"""
+        makers = []
+        
+        try:
+            resp = self.session.get(f"{BASE_URL}/brands", timeout=30)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                
+                for brand_div in soup.find_all('div', class_='brands-list__group-item-title-name'):
+                    brand_name = brand_div.get_text(strip=True).lower()
+                    brand_slug = brand_name.replace(' ', '-')
+                    if brand_slug and brand_slug not in makers:
+                        makers.append(brand_slug)
+                
+                if not makers:
+                    for link in soup.find_all('a', href=True):
+                        href = link['href']
+                        if href.startswith('/') and href.count('/') == 1:
+                            maker = href[1:]
+                            if maker and not any(x in maker for x in ['brands', 'news', 'reviews']):
+                                if maker not in makers:
+                                    makers.append(maker)
+        except:
+            pass
+        
+        if not makers:
+            makers = [
+                'abarth', 'alfa-romeo', 'alpine', 'aston-martin', 'audi',
+                'bentley', 'bmw', 'byd', 'citroen', 'cupra', 'dacia', 'ds',
+                'fiat', 'ford', 'genesis', 'honda', 'hyundai', 'jaguar',
+                'jeep', 'kia', 'land-rover', 'lexus', 'lotus', 'mazda',
+                'mercedes-benz', 'mg', 'mini', 'nissan', 'peugeot', 'polestar',
+                'porsche', 'renault', 'seat', 'skoda', 'smart', 'subaru',
+                'suzuki', 'tesla', 'toyota', 'vauxhall', 'volkswagen', 'volvo'
+            ]
+        
+        return sorted(makers)
+    
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """メーカーページからモデル一覧を取得"""
+        models = []
+        seen = set()
+        
+        try:
+            url = f"{BASE_URL}/{maker}"
+            resp = self.session.get(url, timeout=30)
+            
+            if resp.status_code != 200:
+                return models
+            
+            soup = BeautifulSoup(resp.text, 'lxml')
+            
+            articles = soup.find_all('article', class_='card-compact')
+            
+            for article in articles:
+                for link in article.find_all('a', href=True):
+                    href = link['href']
+                    if f'/{maker}/' in href:
+                        if 'carwow.co.uk' in href:
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                break
+            
+            if not models:
+                all_links = soup.find_all('a', href=True)
+                
+                for link in all_links:
+                    href = link['href']
+                    if f'/{maker}/' in href:
+                        if any(skip in href for skip in ['/news/', '/reviews/', '/colours', '/specifications']):
+                            continue
+                        
+                        if 'carwow.co.uk' in href:
+                            parts = href.split('carwow.co.uk/')[-1].split('?')[0].split('#')[0].split('/')
+                        else:
+                            parts = href.strip('/').split('?')[0].split('#')[0].split('/')
+                        
+                        if len(parts) >= 2 and parts[0] == maker:
+                            model_slug = f"{parts[0]}/{parts[1]}"
+                            if model_slug not in seen:
+                                models.append(model_slug)
+                                seen.add(model_slug)
+                                
+        except Exception as e:
+            print(f"    Error getting models for {maker}: {e}")
+        
+        return models
+    
+    def cleanup(self):
+        """リソースのクリーンアップ"""
+        # キャッシュファイルの最終保存
+        if self.body_type_cache:
+            self._save_body_type_cache()
+        
+        # セッションのクローズ
+        self.session.close()
