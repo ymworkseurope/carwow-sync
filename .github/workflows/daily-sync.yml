@@ -108,3 +108,26 @@ jobs:
           *.json
           body_type_cache.json
         retention-days: 7
+
+            - name: Create cache directory
+      run: |
+        mkdir -p cache
+        touch body_type_cache.json
+    
+    - name: Run sync
+      run: |
+        echo "Starting sync at $(date)"
+        python sync_manager.py ${{ steps.prepare.outputs.args }}
+        echo "Sync completed at $(date)"
+    
+    - name: Upload cache and logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sync-logs-${{ github.run_number }}
+        path: |
+          *.log
+          *.json
+          body_type_cache.json
+          cache/
+        retention-days: 7
