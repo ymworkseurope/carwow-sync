@@ -38,11 +38,19 @@ class CarwowScraper:
         if cache_file.exists():
             try:
                 with open(cache_file, 'r') as f:
-                    self.body_type_cache = json.load(f)
-                print(f"Loaded body type cache with {len(self.body_type_cache)} entries")
+                    content = f.read()
+                    if content.strip():  # 空ファイルチェック
+                        self.body_type_cache = json.loads(content)
+                        print(f"Loaded body type cache with {len(self.body_type_cache)} entries")
+                    else:
+                        print("Body type cache file is empty, will rebuild")
+                        self.body_type_cache = {}
             except Exception as e:
                 print(f"Error loading body type cache: {e}")
                 self.body_type_cache = {}
+        else:
+            print("Body type cache file not found, will create new one")
+            self.body_type_cache = {}
 
     def _save_body_type_cache(self):
         """ボディタイプキャッシュを保存"""
