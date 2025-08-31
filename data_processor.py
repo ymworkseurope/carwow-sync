@@ -125,6 +125,10 @@ class DeepLTranslator:
                 self._save_cache()
                 
                 return translated
+            elif response.status_code == 456:
+                # Quota exceeded - 翻訳をスキップしてオリジナルを返す
+                print(f"DeepL API quota exceeded (456) - using original text")
+                return text
             else:
                 print(f"DeepL API error: {response.status_code}")
                 return text
