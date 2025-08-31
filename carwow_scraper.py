@@ -282,11 +282,11 @@ class CarwowScraper:
         return prices
     
     def _extract_media_urls(self, soup: BeautifulSoup) -> List[str]:
-        """画像URLの取得"""
+        """画像URLの取得（改良版）"""
         media_urls = []
         seen_urls = set()
         
-        # media-slider__image クラスから取得
+        # パターン1: media-slider__image クラスから取得
         slider_images = soup.find_all('img', class_='media-slider__image')
         for img in slider_images:
             srcset = img.get('srcset', '')
@@ -319,7 +319,7 @@ class CarwowScraper:
                 media_urls.append(src)
                 seen_urls.add(src)
         
-        # thumbnail-carousel-vertical__img クラスから取得
+        # パターン2: thumbnail-carousel-vertical__img クラスから取得
         thumbnails = soup.find_all('img', class_='thumbnail-carousel-vertical__img')
         for img in thumbnails:
             url = img.get('data-src') or img.get('src')
@@ -330,6 +330,39 @@ class CarwowScraper:
                 if high_res_url not in seen_urls:
                     media_urls.append(high_res_url)
                     seen_urls.add(high_res_url)
+        
+        # パターン3: imgixドメインから取得（carwow-uk-wp-0.imgix.net等）
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            data_src = img.get('data-src', '')
+            srcset = img.get('srcset', '')
+            
+            # imgixドメインの画像を検索
+            for url_source in [srcset, data_src, src]:
+                if url_source and 'imgix.net' in url_source:
+                    if 'imgix.net' in url_source and ',' in url_source:
+                        # srcsetの場合
+                        entries = url_source.split(',')
+                        for entry in entries:
+                            if 'imgix.net' in entry:
+                                url = entry.strip().split(' ')[0]
+                                if (url not in seen_urls and 
+                                    not any(skip in url.lower() for skip in ['logo', 'icon', 'badge']) and
+                                    len(media_urls) < 10):
+                                    media_urls.append(url)
+                                    seen_urls.add(url)
+                                break
+                    else:
+                        # 単一URL
+                        if (url_source not in seen_urls and 
+                            not any(skip in url_source.lower() for skip in ['logo', 'icon', 'badge']) and
+                            len(media_urls) < 10):
+                            media_urls.append(url_source)
+                            seen_urls.add(url_source)
+                    break
+                
+                if len(media_urls) >= 10:
+                    break
         
         return media_urls[:10]
     
@@ -455,17 +488,32 @@ class CarwowScraper:
             'power_bhp': None
         }
         
-        # エンジン固有の価格のみを取得（推定なし）
-        engine_div = section.find('div', class_='specification-breakdown__title', string=engine_text)
-        if engine_div:
-            parent = engine_div.parent
-            if parent:
-                parent_text = parent.get_text()
-                price_match = re.search(r'£([\d,]+)', parent_text)
-                if price_match:
-                    price_value = int(price_match.group(1).replace(',', ''))
-                    if 10000 <= price_value <= 200000:  # 妥当な車の価格範囲
-                        grade_info['engine_price_gbp'] = price_value
+        # エンジン固有の価格を取得（元のロジック復活 + 厳密化）
+        section_text = section.get_text()
+        
+        # 複数の価格パターンを試す（元のロジックベース）
+        rrp_patterns = [
+            r'RRP\s*£([\d,]+)',
+            r'from\s*£([\d,]+)',
+            r'Price\s*£([\d,]+)'
+        ]
+        
+        for pattern in rrp_patterns:
+            rrp_match = re.search(pattern, section_text)
+            if rrp_match:
+                price_value = int(rrp_match.group(1).replace(',', ''))
+                # より厳密な検証：セクション内に実際にエンジン情報があるかチェック
+                if (engine_text != 'Information not available' and 
+                    engine_text in section_text and 
+                    10000 <= price_value <= 200000):
+                    grade_info['engine_price_gbp'] = price_value
+                    break
+                # エンジン情報がない場合でも、セクション内に価格情報があれば取得
+                elif (engine_text == 'Information not available' and 
+                      10000 <= price_value <= 200000 and
+                      ('trim' in section.get('class', []) or 'RRP' in section_text)):
+                    grade_info['engine_price_gbp'] = price_value
+                    break
         
         # 仕様詳細を取得
         category_lists = section.find_all('ul', class_='specification-breakdown__category-list')
