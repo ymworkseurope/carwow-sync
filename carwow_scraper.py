@@ -57,13 +57,18 @@ class CarwowScraper:
         print("Building body type cache...")
         for body_type, url in BODY_TYPE_URLS.items():
             print(f"  Fetching {body_type} models...")
-            models = self._scrape_body_type_page(url, body_type)
-            for model_name in models:
-                if model_name not in self.body_type_cache:
-                    self.body_type_cache[model_name] = []
-                if body_type not in self.body_type_cache[model_name]:
-                    self.body_type_cache[model_name].append(body_type)
+            try:
+                models = self._scrape_body_type_page(url, body_type)
+                for model_name in models:
+                    if model_name not in self.body_type_cache:
+                        self.body_type_cache[model_name] = []
+                    if body_type not in self.body_type_cache[model_name]:
+                        self.body_type_cache[model_name].append(body_type)
+                print(f"    Found {len(models)} models for {body_type}")
+            except Exception as e:
+                print(f"    Error fetching {body_type}: {e}")
             time.sleep(1)
+        
         self._save_body_type_cache()
         print(f"Body type cache built with {len(self.body_type_cache)} models")
 
