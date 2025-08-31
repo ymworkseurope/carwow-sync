@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 carwow_scraper.py - Fixed Production Version
-修正された問題:
-1. engine_price_gbpが取得できない問題を修正
-2. media_urlsがmedia-slider__imageのsrcsetから正しく取得されるように修正
-3. フォールバック機能を維持しつつ、正確な価格のみを取得
+
 """
 import re
 import json
@@ -497,9 +494,6 @@ class CarwowScraper:
                             if 10000 <= price_value <= 300000:
                                 grade_info['engine_price_gbp'] = price_value
                                 break
-                
-                if grade_info['engine_price_gbp']:
-                    break
         
         # 仕様詳細を取得
         category_lists = section.find_all('ul', class_='specification-breakdown__category-list')
