@@ -138,7 +138,7 @@ class DataProcessor:
             'model_en': raw_data.get('model_en', ''),
             'overview_en': raw_data.get('overview_en', ''),
             'body_type': raw_data.get('body_types', []),
-            'colors': raw_data.get('colors', []),
+            'colors': self.na_value if not raw_data.get('colors') else raw_data.get('colors', []),
             'media_urls': raw_data.get('media_urls', []),
             'catalog_url': raw_data.get('catalog_url', ''),
             
@@ -273,13 +273,13 @@ class DataProcessor:
         else:
             record['transmission_ja'] = trans_ja_map.get(trans, self.dash_value)
         
-        # 駆動方式の日本語変換
+        # 駆動方式の日本語変換（修正：不明をdash_valueに）
         drive_ja_map = {
             'Front-wheel drive': '前輪駆動',
             'Rear-wheel drive': '後輪駆動',
             'All-wheel drive': '全輪駆動',
             'Four-wheel drive': '4WD',
-            self.na_value: '不明'
+            self.na_value: self.dash_value
         }
         
         # 駆動方式が文章形式の場合も処理
@@ -295,7 +295,7 @@ class DataProcessor:
         else:
             record['drive_type_ja'] = drive_ja_map.get(drive, drive)
         
-        # カラーの日本語変換
+        # カラーの日本語変換（修正：colorsがna_valueの場合はdash_valueに）
         color_ja_map = {
             'White': 'ホワイト',
             'Black': 'ブラック',
@@ -312,20 +312,24 @@ class DataProcessor:
             'Metallic': 'メタリック'
         }
         
-        colors_ja = []
-        for color in record.get('colors', []):
-            # 基本色を探して変換
-            ja_color = color
-            for en, ja in color_ja_map.items():
-                if en.lower() in color.lower():
-                    ja_color = color.replace(en, ja)
-                    break
-            colors_ja.append(ja_color)
-        record['colors_ja'] = colors_ja
+        colors = record.get('colors', [])
+        if colors == self.na_value or not colors:
+            record['colors_ja'] = self.dash_value
+        else:
+            colors_ja = []
+            for color in colors:
+                # 基本色を探して変換
+                ja_color = color
+                for en, ja in color_ja_map.items():
+                    if en.lower() in color.lower():
+                        ja_color = color.replace(en, ja)
+                        break
+                colors_ja.append(ja_color)
+            record['colors_ja'] = colors_ja
         
-        # 寸法の日本語説明（修正：na_valueの場合はdash_valueに）
+        # 寸法の日本語説明（修正：フォーマットを変更）
         if record.get('dimensions_mm') and record['dimensions_mm'] != self.na_value:
-            record['dimensions_ja'] = f"寸法: {record['dimensions_mm']}"
+            record['dimensions_ja'] = self._format_dimensions_ja(record['dimensions_mm'])
         else:
             record['dimensions_ja'] = self.dash_value
         
@@ -370,6 +374,25 @@ class DataProcessor:
         # Information not availableの場合は空の辞書を返す
         if engine_text == self.na_value:
             return details
+    
+    def _format_dimensions_ja(self, dimensions_mm: str) -> str:
+        """寸法を日本語形式にフォーマット（例：全長3.4m、全幅1.48m、全高2.0m）"""
+        if not dimensions_mm or dimensions_mm == self.na_value:
+            return self.dash_value
+        
+        # 例: "3400 x 1480 x 2000 mm" や "3400x1480x2000" の形式を想定
+        # 数字を抽出
+        numbers = re.findall(r'\d+', dimensions_mm)
+        
+        if len(numbers) >= 3:
+            length_m = float(numbers[0]) / 1000  # mmをmに変換
+            width_m = float(numbers[1]) / 1000
+            height_m = float(numbers[2]) / 1000
+            
+            return f"全長{length_m}m、全幅{width_m}m、全高{height_m}m"
+        
+        # パースできない場合は元の値を返す
+        return dimensions_mm
         
         # 電気自動車の場合（kW/kWh形式）
         electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
