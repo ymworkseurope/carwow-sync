@@ -158,32 +158,47 @@ class DataProcessor:
             'Audi': 'アウディ',
             'Bentley': 'ベントレー',
             'BMW': 'BMW',
+            'Bmw': 'BMW',
             'BYD': 'BYD',
             'Citroen': 'シトロエン',
             'Cupra': 'クプラ',
             'Dacia': 'ダチア',
             'DS': 'DS',
+            'Ds': 'DS',
+            'Ferrari': 'フェラーリ',
             'Fiat': 'フィアット',
             'Ford': 'フォード',
             'Genesis': 'ジェネシス',
+            'Gwm': 'GWM',
             'Honda': 'ホンダ',
             'Hyundai': 'ヒュンダイ',
+            'Ineos': 'イネオス',
+            'Infiniti': 'インフィニティ',
+            'Jaecoo': 'ジャエクー',
             'Jaguar': 'ジャガー',
             'Jeep': 'ジープ',
+            'Kgm Motors': 'KGMモーターズ',
             'Kia': 'キア',
+            'Lamborghini': 'ランボルギーニ',
             'Land Rover': 'ランドローバー',
             'Lexus': 'レクサス',
             'Lotus': 'ロータス',
+            'Maserati': 'マセラティ',
             'Mazda': 'マツダ',
+            'Mclaren': 'マクラーレン',
             'Mercedes-Benz': 'メルセデス・ベンツ',
             'MG': 'MG',
+            'Mg': 'MG',
             'MINI': 'ミニ',
             'Mini': 'ミニ',
+            'Mitsubishi': '三菱',
             'Nissan': '日産',
+            'Omoda': 'オモダ',
             'Peugeot': 'プジョー',
             'Polestar': 'ポールスター',
             'Porsche': 'ポルシェ',
             'Renault': 'ルノー',
+            'Rolls Royce': 'ロールスロイス',
             'SEAT': 'セアト',
             'Seat': 'セアト',
             'Skoda': 'シュコダ',
@@ -245,20 +260,20 @@ class DataProcessor:
             record['transmission_ja'] = trans_ja_map.get(trans, self.dash_value)
         
         drive_ja_map = {
-            'Front-wheel drive': '前輪駆動',
-            'Rear-wheel drive': '後輪駆動',
-            'All-wheel drive': '全輪駆動',
+            'Front-wheel drive': 'FF',
+            'Rear-wheel drive': 'FR',
+            'All-wheel drive': 'AWD',
             'Four-wheel drive': '4WD',
             self.na_value: self.dash_value
         }
         
         drive = record.get('drive_type', '')
         if 'Front' in drive or 'front' in drive:
-            record['drive_type_ja'] = '前輪駆動'
+            record['drive_type_ja'] = 'FF'
         elif 'Rear' in drive or 'rear' in drive:
-            record['drive_type_ja'] = '後輪駆動'
+            record['drive_type_ja'] = 'FR'
         elif 'All' in drive or 'all' in drive:
-            record['drive_type_ja'] = '全輪駆動'
+            record['drive_type_ja'] = 'AWD'
         elif 'Four' in drive or '4' in drive:
             record['drive_type_ja'] = '4WD'
         else:
