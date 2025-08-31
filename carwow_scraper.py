@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - Fixed Production Version
+carwow_scraper.py - Fixed Production Version with Redirect Detection
 """
 import re
 import json
@@ -116,11 +116,22 @@ class CarwowScraper:
         return []
 
     def scrape_vehicle(self, slug: str) -> Optional[Dict]:
-        """車両データを取得"""
+        """車両データを取得（リダイレクト検出付き）"""
         main_url = f"{BASE_URL}/{slug}"
+        
+        # リダイレクトを検出するためallow_redirects=Falseを設定
+        main_resp = self.session.get(main_url, timeout=30, allow_redirects=False)
+        
+        # リダイレクト（3xx系ステータスコード）が発生した場合は処理を中止
+        if 300 <= main_resp.status_code < 400:
+            print(f"    Redirect detected for {slug} (status: {main_resp.status_code}), skipping...")
+            return None
+            
+        # 通常のリクエスト（リダイレクトをフォロー）
         main_resp = self.session.get(main_url, timeout=30)
         if main_resp.status_code != 200:
             return None
+            
         main_soup = BeautifulSoup(main_resp.text, 'lxml')
         make_en, model_en = self._extract_make_model(slug, main_soup)
         overview_en = self._extract_overview(main_soup)
@@ -129,6 +140,7 @@ class CarwowScraper:
         specs_data = self._scrape_specifications(slug)
         colors = self._scrape_colors(slug)
         body_types = self._get_body_types_for_model(model_en, slug)
+        
         if not body_types or any(grade.get('fuel') == 'Information not available' for grade in specs_data.get('grades_engines', [])):
             fallback_body_types, fallback_fuel = self._extract_body_type_and_fuel_from_main(main_soup)
             if not body_types and fallback_body_types:
@@ -137,6 +149,11 @@ class CarwowScraper:
                 for grade in specs_data.get('grades_engines', []):
                     if grade.get('fuel') == 'Information not available':
                         grade['fuel'] = fallback_fuel
+        
+        # body_typeが空の場合は"Information not available"を設定
+        if not body_types:
+            body_types = ['Information not available']
+            
         return {
             'slug': slug,
             'make_en': make_en,
@@ -147,7 +164,7 @@ class CarwowScraper:
             'specifications': specs_data.get('specifications', {}),
             'colors': colors,
             'media_urls': media_urls,
-            'body_types': body_types if body_types else [],
+            'body_types': body_types,
             'catalog_url': main_url
         }
 
@@ -287,12 +304,19 @@ class CarwowScraper:
         return body_types, fuel_type
 
     def _scrape_specifications(self, slug: str) -> Dict:
-        """Specificationsページから詳細データ取得"""
+        """Specificationsページから詳細データ取得（リダイレクト検出付き）"""
         specs_url = f"{BASE_URL}/{slug}/specifications"
         try:
+            # リダイレクト検出
             specs_resp = self.session.get(specs_url, timeout=30, allow_redirects=False)
+            
+            # リダイレクトが発生した場合はメインページからデータ取得
+            if 300 <= specs_resp.status_code < 400:
+                return self._extract_specs_from_main(slug)
+                
             if specs_resp.status_code != 200:
                 return self._extract_specs_from_main(slug)
+                
             specs_soup = BeautifulSoup(specs_resp.text, 'lxml')
             grades_engines = self._extract_grades_engines(specs_soup)
             specifications = self._extract_basic_specs(specs_soup)
@@ -449,11 +473,16 @@ class CarwowScraper:
         return specs
 
     def _scrape_colors(self, slug: str) -> List[str]:
-        """カラー情報を取得"""
+        """カラー情報を取得（リダイレクト検出付き）"""
         colors = []
         colors_url = f"{BASE_URL}/{slug}/colours"
         try:
             colors_resp = self.session.get(colors_url, timeout=30, allow_redirects=False)
+            
+            # リダイレクトが発生した場合はスキップ
+            if 300 <= colors_resp.status_code < 400:
+                return colors
+                
             if colors_resp.status_code == 200:
                 colors_soup = BeautifulSoup(colors_resp.text, 'lxml')
                 for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
@@ -469,9 +498,15 @@ class CarwowScraper:
         """メインページから仕様を抽出（specificationsページがない場合）"""
         try:
             main_url = f"{BASE_URL}/{slug}"
-            main_resp = self.session.get(main_url, timeout=30)
+            main_resp = self.session.get(main_url, timeout=30, allow_redirects=False)
+            
+            # リダイレクトが発生した場合
+            if 300 <= main_resp.status_code < 400:
+                return {'grades_engines': [], 'specifications': {}}
+                
             if main_resp.status_code != 200:
                 return {'grades_engines': [], 'specifications': {}}
+                
             soup = BeautifulSoup(main_resp.text, 'lxml')
             text = soup.get_text()
             grade_info = {
@@ -553,7 +588,7 @@ class CarwowScraper:
                                 seen.add(model_slug)
                                 break
             if not models:
-                all_links = soup.find_all('a', href=True)
+                all_links = soup.find_all('a', href=True):
                 for link in all_links:
                     href = link['href']
                     if f'/{maker}/' in href:
