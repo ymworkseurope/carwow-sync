@@ -1,4 +1,4 @@
-name: Daily Carwow Sync with Selenium
+name: Daily Carwow Sync
 on:
   schedule:
     # 日本時間 02:00（UTC 17:00 前日）
@@ -17,10 +17,6 @@ on:
         description: 'Run in test mode (process only 5 vehicles)'
         required: false
         default: 'false'
-      use_selenium:
-        description: 'Use Selenium for enhanced scraping'
-        required: false
-        default: 'false'
 
 jobs:
   sync:
@@ -30,7 +26,6 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-      DEEPL_KEY: ${{ secrets.DEEPL_KEY }}
       GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID: ${{ secrets.GS_SHEET_ID }}
       GBP_TO_JPY: "185"
@@ -45,25 +40,16 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
     
-    - name: Install Chrome and ChromeDriver (for Selenium)
-      if: github.event.inputs.use_selenium == 'true'
-      run: |
-        # Chromeのインストール
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-        
-        # ChromeDriverは webdriver-manager が自動的に管理
-    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        if [ "${{ github.event.inputs.use_selenium }}" = "true" ]; then
-          pip install -r requirements_selenium.txt
-        else
-          pip install -r requirements.txt
-        fi
+        pip install -r requirements.txt
+    
+    - name: Create cache directory and files
+      run: |
+        mkdir -p cache
+        touch body_type_cache.json
+        touch sync.log
     
     - name: Prepare arguments
       id: prepare
@@ -85,49 +71,22 @@ jobs:
           ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
         fi
         
-        # Selenium
-        if [ "${{ github.event.inputs.use_selenium }}" = "true" ]; then
-          ARGS="$ARGS --selenium"
-        fi
-        
         echo "args=$ARGS" >> $GITHUB_OUTPUT
     
     - name: Run sync
       run: |
         echo "Starting sync at $(date)"
-        python sync_manager.py ${{ steps.prepare.outputs.args }}
+        python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
         echo "Sync completed at $(date)"
     
-    - name: Upload logs
+    - name: Upload logs and cache
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: sync-logs-${{ github.run_number }}
         path: |
-          *.log
-          *.json
-          body_type_cache.json
-        retention-days: 7
-
-            - name: Create cache directory
-      run: |
-        mkdir -p cache
-        touch body_type_cache.json
-    
-    - name: Run sync
-      run: |
-        echo "Starting sync at $(date)"
-        python sync_manager.py ${{ steps.prepare.outputs.args }}
-        echo "Sync completed at $(date)"
-    
-    - name: Upload cache and logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: sync-logs-${{ github.run_number }}
-        path: |
-          *.log
-          *.json
+          sync.log
           body_type_cache.json
           cache/
         retention-days: 7
+        if-no-files-found: warn
