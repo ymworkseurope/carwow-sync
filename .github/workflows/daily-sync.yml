@@ -30,8 +30,7 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # タイムアウトを条件付きで設定（テストモード: 60分、通常: 180分）
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 60 || 180 }}
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 90 || 240 }}
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
