@@ -1,4 +1,5 @@
 name: Daily Carwow Sync
+
 on:
   schedule:
     # 日本時間 02:00（UTC 17:00 前日）
@@ -17,10 +18,20 @@ on:
         description: 'Run in test mode (process only 5 vehicles)'
         required: false
         default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      cleanup_days:
+        description: 'Delete inactive records older than X days (leave empty to skip)'
+        required: false
+        default: ''
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6時間（全メーカー処理用）
+    # タイムアウトを条件付きで設定（テストモード: 60分、通常: 180分）
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 60 || 180 }}
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -52,6 +63,8 @@ jobs:
         touch exchange_rate_cache.json
         touch deepl_quota.json
         touch sync.log
+        touch scraper.log
+        touch processor.log
     
     - name: Prepare arguments
       id: prepare
@@ -73,13 +86,24 @@ jobs:
           ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
         fi
         
+        # Cleanup
+        if [ -n "${{ github.event.inputs.cleanup_days }}" ]; then
+          ARGS="$ARGS --cleanup ${{ github.event.inputs.cleanup_days }}"
+        fi
+        
         echo "args=$ARGS" >> $GITHUB_OUTPUT
     
     - name: Run sync
       run: |
         echo "Starting sync at $(date)"
-        python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
+        python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee -a sync.log
         echo "Sync completed at $(date)"
+    
+    - name: Weekly cleanup (Sundays only)
+      if: github.event_name == 'schedule' && $(date +%u) == '7'
+      run: |
+        echo "Running weekly cleanup of inactive records..."
+        python sync_manager.py --cleanup 90
     
     - name: Upload logs and cache
       if: always()
@@ -88,9 +112,21 @@ jobs:
         name: sync-logs-${{ github.run_number }}
         path: |
           sync.log
+          scraper.log
+          processor.log
           body_type_cache.json
           translation_cache.json
           exchange_rate_cache.json
           deepl_quota.json
         retention-days: 7
         if-no-files-found: warn
+    
+    - name: Check for errors
+      if: failure()
+      run: |
+        echo "Sync failed. Checking logs for errors..."
+        if [ -f sync.log ]; then
+          echo "=== Last 50 lines of sync.log ==="
+          tail -n 50 sync.log
+        fi
+        exit 1
