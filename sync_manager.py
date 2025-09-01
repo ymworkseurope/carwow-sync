@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 修正版
+sync_manager.py - Improved Version with Better ID Management and Inactive Record Handling
 実行管理とデータベース・スプレッドシート同期モジュール
 """
 import os
@@ -9,8 +9,9 @@ import json
 import time
 import hashlib
 import argparse
-from datetime import datetime
-from typing import Dict, List, Optional
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import requests
@@ -43,8 +44,18 @@ SHEET_HEADERS = [
     "overview_en", "overview_ja", "doors", "seats", "power_bhp",
     "drive_type", "drive_type_ja", "dimensions_mm", "dimensions_ja",
     "colors", "colors_ja", "media_urls", "catalog_url",
-    "full_model_ja", "updated_at", "spec_json"
+    "full_model_ja", "is_active", "last_updated", "updated_at", "spec_json"
 ]
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('sync.log'),
+        logging.StreamHandler()
+    ]
+)
 
 # ======================== Database Manager ========================
 class SupabaseManager:
@@ -54,12 +65,13 @@ class SupabaseManager:
         self.url = SUPABASE_URL
         self.key = SUPABASE_KEY
         self.enabled = bool(self.url and self.key)
+        self.logger = logging.getLogger(__name__)
         
         if not self.enabled:
-            print("Warning: Supabase credentials not configured")
+            self.logger.warning("Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（重複時は更新）"""
+        """データをUPSERT（IDベースで重複防止）"""
         if not self.enabled:
             return False
         
@@ -74,7 +86,7 @@ class SupabaseManager:
             # データ型の変換
             clean_payload = self._prepare_payload(payload)
             
-            # 最初にUPSERTを試みる
+            # IDベースでUPSERT（resolution=merge-duplicates）
             upsert_headers = headers.copy()
             upsert_headers['Prefer'] = 'resolution=merge-duplicates,return=minimal'
             
@@ -88,12 +100,9 @@ class SupabaseManager:
             if response.status_code in [200, 201, 204]:
                 return True
             elif response.status_code == 409:
-                # 重複エラーの場合はUPDATEを試みる
-                if 'slug' in clean_payload and 'grade' in clean_payload and 'engine' in clean_payload:
-                    update_url = f"{self.url}/rest/v1/cars"
-                    update_url += f"?slug=eq.{clean_payload['slug']}"
-                    update_url += f"&grade=eq.{clean_payload['grade']}"
-                    update_url += f"&engine=eq.{clean_payload['engine']}"
+                # 重複エラーの場合はIDベースでUPDATE
+                if 'id' in clean_payload:
+                    update_url = f"{self.url}/rest/v1/cars?id=eq.{clean_payload['id']}"
                     
                     update_response = requests.patch(
                         update_url,
@@ -105,16 +114,77 @@ class SupabaseManager:
                     if update_response.status_code in [200, 204]:
                         return True
                     else:
-                        print(f"Supabase update error {update_response.status_code}: {update_response.text[:200]}")
+                        self.logger.error(f"Supabase update error {update_response.status_code}: {update_response.text[:200]}")
                         return False
                 return False
             else:
-                print(f"Supabase error {response.status_code}: {response.text[:200]}")
+                self.logger.error(f"Supabase error {response.status_code}: {response.text[:200]}")
                 return False
                 
         except Exception as e:
-            print(f"Supabase upsert error: {e}")
+            self.logger.error(f"Supabase upsert error: {e}")
             return False
+    
+    def mark_inactive(self, slug: str) -> bool:
+        """スラグに対応するレコードを非アクティブに設定"""
+        if not self.enabled:
+            return False
+            
+        try:
+            headers = {
+                'apikey': self.key,
+                'Authorization': f'Bearer {self.key}',
+                'Content-Type': 'application/json'
+            }
+            
+            update_data = {
+                'is_active': False,
+                'last_updated': datetime.utcnow().isoformat()
+            }
+            
+            response = requests.patch(
+                f"{self.url}/rest/v1/cars?slug=eq.{slug}",
+                headers=headers,
+                json=update_data,
+                timeout=30
+            )
+            
+            if response.status_code in [200, 204]:
+                self.logger.info(f"Marked {slug} as inactive in Supabase")
+                return True
+            else:
+                self.logger.error(f"Error marking {slug} inactive: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error marking {slug} inactive: {e}")
+            return False
+    
+    def delete_inactive(self, days_threshold: int = 90) -> int:
+        """指定日数以上更新のない非アクティブレコードを削除"""
+        if not self.enabled:
+            return 0
+            
+        try:
+            headers = {
+                'apikey': self.key,
+                'Authorization': f'Bearer {self.key}',
+                'Content-Type': 'application/json'
+            }
+            
+            cutoff_date = (datetime.utcnow() - timedelta(days=days_threshold)).isoformat()
+            
+            # まず削除対象のカウントを取得
+            count_url = f"{self.url}/rest/v1/cars?is_active=eq.false&last_updated=lt.{cutoff_date}&select=count"
+            count_response = requests.get(count_url, headers=headers, timeout=30)
+            
+            if count_response.status_code == 200:
+                count_data = count_response.json()
+                count = count_data[0]['count'] if count_data else 0
+                
+                if count > 0:
+                    # 削除実行
+                    delete_url = f"{self.url}/rest/v1/cars?is_active=eq.false&last_updated=lt.{cutoff_date}"
     
     def _prepare_payload(self, payload: Dict) -> Dict:
         """ペイロードをデータベース用に準備"""
@@ -157,12 +227,16 @@ class SupabaseManager:
                         pass
             
             # 整数型のフィールド
-            elif key in ['doors', 'seats', 'power_bhp']:
+            elif key in ['doors', 'seats', 'power_bhp', 'id']:
                 if value not in ['Information not available', 'ー'] and value is not None:
                     try:
                         clean[key] = int(value)
                     except (ValueError, TypeError):
                         pass
+            
+            # ブール型のフィールド
+            elif key == 'is_active':
+                clean[key] = bool(value)
             
             # その他のフィールド
             else:
@@ -183,7 +257,8 @@ class GoogleSheetsManager:
         self.headers = SHEET_HEADERS
         self.last_request_time = 0
         self.request_count = 0
-        self.rate_limit_per_100_seconds = 90  # 安全マージン
+        self.rate_limit_per_100_seconds = 95  # 改善: 90から95に緩和
+        self.logger = logging.getLogger(__name__)
         self._initialize()
     
     def _rate_limit_check(self):
@@ -199,7 +274,7 @@ class GoogleSheetsManager:
         if self.request_count >= self.rate_limit_per_100_seconds:
             sleep_time = 100 - (current_time - self.last_request_time)
             if sleep_time > 0:
-                print(f"Rate limit reached, waiting {sleep_time:.1f} seconds...")
+                self.logger.info(f"Rate limit reached, waiting {sleep_time:.1f} seconds...")
                 time.sleep(sleep_time)
                 self.request_count = 0
                 self.last_request_time = time.time()
@@ -209,7 +284,7 @@ class GoogleSheetsManager:
     def _initialize(self):
         """Google Sheets接続を初期化"""
         if not (GS_CREDS_JSON and GS_SHEET_ID):
-            print("Warning: Google Sheets credentials not configured")
+            self.logger.warning("Google Sheets credentials not configured")
             return
         
         creds_path = Path("temp_creds.json")
@@ -254,10 +329,10 @@ class GoogleSheetsManager:
             self._setup_headers()
             
             self.enabled = True
-            print(f"Connected to Google Sheets: {SHEET_NAME}")
+            self.logger.info(f"Connected to Google Sheets: {SHEET_NAME}")
             
         except Exception as e:
-            print(f"Google Sheets initialization error: {e}")
+            self.logger.error(f"Google Sheets initialization error: {e}")
             self.enabled = False
         
         finally:
@@ -274,7 +349,7 @@ class GoogleSheetsManager:
                 self._rate_limit_check()
                 self.worksheet.update([self.headers], "A1")
         except Exception as e:
-            print(f"Error setting headers: {e}")
+            self.logger.error(f"Error setting headers: {e}")
     
     def upsert(self, payload: Dict) -> bool:
         """データをUPSERT"""
@@ -285,12 +360,9 @@ class GoogleSheetsManager:
             # レート制限チェック
             self._rate_limit_check()
             
-            # ユニークキーでの検索
-            slug = payload.get('slug')
-            grade = payload.get('grade', 'Standard')
-            engine = payload.get('engine', 'N/A')
-            
-            if not slug:
+            # IDでの検索
+            record_id = payload.get('id')
+            if not record_id:
                 return False
             
             # 既存の行を検索
@@ -299,10 +371,9 @@ class GoogleSheetsManager:
                 row_num = None
                 
                 for i, row in enumerate(all_values[1:], start=2):
-                    if len(row) > 7:
-                        if row[1] == slug and row[6] == grade and row[7] == engine:
-                            row_num = i
-                            break
+                    if len(row) > 0 and str(row[0]) == str(record_id):
+                        row_num = i
+                        break
                 
                 if not row_num:
                     row_num = len(all_values) + 1
@@ -324,7 +395,53 @@ class GoogleSheetsManager:
             return True
             
         except Exception as e:
-            print(f"Sheets upsert error: {e}")
+            self.logger.error(f"Sheets upsert error: {e}")
+            return False
+    
+    def mark_inactive(self, slug: str) -> bool:
+        """スラグに対応する行を非アクティブに設定"""
+        if not self.enabled:
+            return False
+            
+        try:
+            self._rate_limit_check()
+            all_values = self.worksheet.get_all_values()
+            
+            for i, row in enumerate(all_values[1:], start=2):
+                if len(row) > 1 and row[1] == slug:  # slugは2列目
+                    # is_activeとlast_updatedの列インデックスを取得
+                    is_active_idx = self.headers.index('is_active')
+                    last_updated_idx = self.headers.index('last_updated')
+                    
+                    # 更新する値を準備
+                    updates = []
+                    
+                    # is_activeをFalseに
+                    col_letter = chr(ord('A') + is_active_idx)
+                    updates.append({
+                        'range': f"{col_letter}{i}",
+                        'values': [['FALSE']]
+                    })
+                    
+                    # last_updatedを現在時刻に
+                    col_letter = chr(ord('A') + last_updated_idx)
+                    updates.append({
+                        'range': f"{col_letter}{i}",
+                        'values': [[datetime.utcnow().isoformat()]]
+                    })
+                    
+                    # バッチ更新
+                    self._rate_limit_check()
+                    self.worksheet.batch_update(updates)
+                    
+                    self.logger.info(f"Marked {slug} as inactive in Google Sheets")
+                    return True
+            
+            self.logger.warning(f"No matching row found for {slug}")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error marking {slug} inactive: {e}")
             return False
     
     def _prepare_row_data(self, payload: Dict) -> List[str]:
@@ -346,6 +463,8 @@ class GoogleSheetsManager:
                 row_data.append(json.dumps(value, ensure_ascii=False))
             elif isinstance(value, datetime):
                 row_data.append(value.isoformat())
+            elif isinstance(value, bool):
+                row_data.append('TRUE' if value else 'FALSE')
             else:
                 row_data.append(str(value))
         
@@ -366,25 +485,25 @@ class GoogleSheetsManager:
             existing_data = self.worksheet.get_all_values()
             existing_map = {}
             
-            # 既存データのマッピング作成
+            # 既存データのマッピング作成（IDベース）
             for i, row in enumerate(existing_data[1:], start=2):
-                if len(row) > 7:
-                    key = f"{row[1]}_{row[6]}_{row[7]}"  # slug_grade_engine
-                    existing_map[key] = i
+                if len(row) > 0:
+                    record_id = row[0]  # IDは最初の列
+                    existing_map[str(record_id)] = i
             
             # 更新用と新規用に分類
             updates = []
             new_rows = []
             
             for payload in payloads:
-                slug = payload.get('slug', '')
-                grade = payload.get('grade', 'Standard')
-                engine = payload.get('engine', 'N/A')
-                key = f"{slug}_{grade}_{engine}"
+                record_id = str(payload.get('id', ''))
+                if not record_id:
+                    continue
+                    
                 row_data = self._prepare_row_data(payload)
                 
-                if key in existing_map:
-                    updates.append((existing_map[key], row_data))
+                if record_id in existing_map:
+                    updates.append((existing_map[record_id], row_data))
                 else:
                     new_rows.append(row_data)
             
@@ -422,7 +541,7 @@ class GoogleSheetsManager:
                 success_count += len(new_rows)
                 
         except Exception as e:
-            print(f"Batch upsert error: {e}")
+            self.logger.error(f"Batch upsert error: {e}")
             # エラー時は個別処理にフォールバック
             for payload in payloads:
                 if self.upsert(payload):
@@ -440,30 +559,32 @@ class SyncManager:
         self.processor = DataProcessor()
         self.supabase = SupabaseManager()
         self.sheets = GoogleSheetsManager()
+        self.logger = logging.getLogger(__name__)
         
         # DeepL APIキーの確認
         if not os.getenv('DEEPL_KEY'):
-            print("Warning: DeepL API key not configured - translations will not be available")
+            self.logger.warning("DeepL API key not configured - translations will not be available")
         
         self.stats = {
             'total': 0,
             'success': 0,
             'failed': 0,
             'skipped': 0,
+            'inactive': 0,
             'records_saved': 0,
             'errors': []
         }
     
     def sync_all(self, makers: Optional[List[str]] = None, limit: Optional[int] = None):
         """全データを同期"""
-        print("=" * 60)
-        print("Starting Carwow Data Sync")
-        print(f"Time: {datetime.now().isoformat()}")
-        print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
-        print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
-        print(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
-        print(f"Exchange Rate: Auto-fetching enabled")
-        print("=" * 60)
+        self.logger.info("=" * 60)
+        self.logger.info("Starting Carwow Data Sync")
+        self.logger.info(f"Time: {datetime.now().isoformat()}")
+        self.logger.info(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
+        self.logger.info(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
+        self.logger.info(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
+        self.logger.info(f"Exchange Rate: Auto-fetching enabled")
+        self.logger.info("=" * 60)
         
         if makers is None:
             makers = self.scraper.get_all_makers()
@@ -471,18 +592,18 @@ class SyncManager:
             exclude = ['editorial', 'leasing', 'news', 'reviews', 'deals', 'advice']
             makers = [m for m in makers if m not in exclude]
         
-        print(f"Processing {len(makers)} makers")
+        self.logger.info(f"Processing {len(makers)} makers")
         
         for maker_idx, maker in enumerate(makers):
-            print(f"\n[{maker_idx + 1}/{len(makers)}] Processing: {maker}")
+            self.logger.info(f"\n[{maker_idx + 1}/{len(makers)}] Processing: {maker}")
             
             try:
                 models = self.scraper.get_models_for_maker(maker)
-                print(f"  Found {len(models)} models")
+                self.logger.info(f"  Found {len(models)} models")
                 
                 for model_idx, model_slug in enumerate(models):
                     if limit and self.stats['total'] >= limit:
-                        print("\nReached limit, stopping...")
+                        self.logger.info("\nReached limit, stopping...")
                         self._print_statistics()
                         return
                     
@@ -493,7 +614,7 @@ class SyncManager:
                     time.sleep(0.5)
                     
             except Exception as e:
-                print(f"  Error processing maker {maker}: {e}")
+                self.logger.error(f"  Error processing maker {maker}: {e}")
                 self.stats['errors'].append(f"Maker {maker}: {str(e)}")
             
             finally:
@@ -508,11 +629,11 @@ class SyncManager:
     
     def sync_specific(self, slugs: List[str]):
         """特定の車両のみ同期"""
-        print(f"Syncing {len(slugs)} specific vehicles")
-        print(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
-        print(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
-        print(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
-        print("=" * 60)
+        self.logger.info(f"Syncing {len(slugs)} specific vehicles")
+        self.logger.info(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
+        self.logger.info(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
+        self.logger.info(f"DeepL Translation: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
+        self.logger.info("=" * 60)
         
         for idx, slug in enumerate(slugs):
             self.stats['total'] += 1
@@ -523,17 +644,29 @@ class SyncManager:
         self.scraper.cleanup()
         self._print_statistics()
     
+    def cleanup_inactive(self, days_threshold: int = 90):
+        """非アクティブレコードをクリーンアップ"""
+        self.logger.info(f"Cleaning up inactive records older than {days_threshold} days")
+        
+        deleted_count = self.supabase.delete_inactive(days_threshold)
+        
+        self.logger.info(f"Cleanup completed: {deleted_count} records deleted")
+        return deleted_count
+    
     def _process_vehicle(self, slug: str, current: int, total: int):
         """個別車両を処理"""
         try:
-            print(f"  [{current}/{total}] {slug}...", end=" ")
+            self.logger.info(f"  [{current}/{total}] {slug}...")
             
             # スクレイピング
             raw_data = self.scraper.scrape_vehicle(slug)
             
             if not raw_data:
-                print("NO DATA (redirect or not found)")
-                self.stats['skipped'] += 1
+                self.logger.info(f"    NO DATA (redirect or not found) - marking as inactive")
+                # 販売終了車両を非アクティブに設定
+                self.supabase.mark_inactive(slug)
+                self.sheets.mark_inactive(slug)
+                self.stats['inactive'] += 1
                 return
             
             # データ処理（複数のレコードが返される）
@@ -550,48 +683,51 @@ class SyncManager:
                     self.stats['records_saved'] += 1
             
             if saved_count > 0:
-                print(f"OK ({saved_count}/{len(records)} records)")
+                self.logger.info(f"    OK ({saved_count}/{len(records)} records)")
                 self.stats['success'] += 1
             else:
-                print("FAILED")
+                self.logger.info(f"    FAILED")
                 self.stats['failed'] += 1
                 
         except Exception as e:
             error_msg = str(e)
             if "404" in error_msg:
-                print("NOT FOUND")
+                self.logger.info(f"    NOT FOUND")
                 self.stats['skipped'] += 1
             elif "redirect" in error_msg.lower():
-                print("REDIRECT")
-                self.stats['skipped'] += 1
+                self.logger.info(f"    REDIRECT - marking as inactive")
+                self.supabase.mark_inactive(slug)
+                self.sheets.mark_inactive(slug)
+                self.stats['inactive'] += 1
             else:
-                print(f"ERROR: {error_msg[:50]}")
+                self.logger.error(f"    ERROR: {error_msg[:50]}")
                 self.stats['failed'] += 1
             self.stats['errors'].append(f"{slug}: {error_msg}")
     
     def _print_statistics(self):
         """統計情報を表示"""
-        print("\n" + "=" * 60)
-        print("Sync Statistics")
-        print("=" * 60)
-        print(f"Total vehicles processed: {self.stats['total']}")
-        print(f"Successful: {self.stats['success']}")
-        print(f"Failed: {self.stats['failed']}")
-        print(f"Skipped (redirects): {self.stats['skipped']}")
-        print(f"Total records saved: {self.stats['records_saved']}")
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("Sync Statistics")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Total vehicles processed: {self.stats['total']}")
+        self.logger.info(f"Successful: {self.stats['success']}")
+        self.logger.info(f"Failed: {self.stats['failed']}")
+        self.logger.info(f"Skipped (404): {self.stats['skipped']}")
+        self.logger.info(f"Marked inactive: {self.stats['inactive']}")
+        self.logger.info(f"Total records saved: {self.stats['records_saved']}")
         
         if self.stats['errors']:
-            print(f"\nErrors (showing first 10):")
+            self.logger.info(f"\nErrors (showing first 10):")
             for error in self.stats['errors'][:10]:
-                print(f"  - {error[:100]}")
+                self.logger.info(f"  - {error[:100]}")
         
         if self.stats['total'] > 0:
             success_rate = (self.stats['success'] / self.stats['total']) * 100
-            print(f"\nSuccess rate: {success_rate:.1f}%")
+            self.logger.info(f"\nSuccess rate: {success_rate:.1f}%")
             
             if self.stats['success'] > 0:
                 avg_records = self.stats['records_saved'] / self.stats['success']
-                print(f"Average records per vehicle: {avg_records:.1f}")
+                self.logger.info(f"Average records per vehicle: {avg_records:.1f}")
 
 # ======================== CLI Interface ========================
 def main():
@@ -605,6 +741,7 @@ Examples:
   python sync_manager.py --makers audi bmw         # Specific makers
   python sync_manager.py --models audi/a4 bmw/x5   # Specific models
   python sync_manager.py --limit 10                # Limit to 10 vehicles
+  python sync_manager.py --cleanup 90              # Delete records inactive for 90+ days
         """
     )
     
@@ -630,6 +767,12 @@ Examples:
         '--test',
         action='store_true',
         help='Run in test mode (process only 5 vehicles)'
+    )
+    
+    parser.add_argument(
+        '--cleanup',
+        type=int,
+        help='Delete inactive records older than specified days'
     )
     
     parser.add_argument(
@@ -669,6 +812,11 @@ Examples:
         print("Running in TEST mode (limit=5)")
     
     manager = SyncManager()
+    
+    # クリーンアップモード
+    if args.cleanup:
+        manager.cleanup_inactive(args.cleanup)
+        return
     
     # 少なくとも1つの同期先が有効かチェック
     if not manager.supabase.enabled and not manager.sheets.enabled:
