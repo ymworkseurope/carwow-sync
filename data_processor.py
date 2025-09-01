@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 data_processor.py - 修正版
-エンジン単位でレコードを生成、ID生成を改善、ハイブリッド/電気情報保持
+エンジン単位でレコードを生成、ID生成を改善
 """
 import re
 import json
 import os
 import time
 import hashlib
-import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import requests
@@ -20,7 +19,6 @@ class ExchangeRateAPI:
         self.cache_file = 'exchange_rate_cache.json'
         self.cache_duration = 3600  # 1時間キャッシュ
         self.rate = None
-        self.logger = logging.getLogger(__name__)
         self._load_cached_rate()
     
     def _load_cached_rate(self):
@@ -31,9 +29,9 @@ class ExchangeRateAPI:
                     cache = json.load(f)
                     if time.time() - cache.get('timestamp', 0) < self.cache_duration:
                         self.rate = cache.get('rate')
-                        self.logger.info(f"Using cached exchange rate: 1 GBP = {self.rate} JPY")
-            except Exception as e:
-                self.logger.error(f"Error loading exchange rate cache: {e}")
+                        print(f"Using cached exchange rate: 1 GBP = {self.rate} JPY")
+            except:
+                pass
     
     def get_rate(self) -> float:
         """GBPからJPYへの為替レートを取得"""
@@ -57,14 +55,14 @@ class ExchangeRateAPI:
                         'timestamp': time.time()
                     }, f)
                 
-                self.logger.info(f"Fetched exchange rate: 1 GBP = {self.rate} JPY")
+                print(f"Fetched exchange rate: 1 GBP = {self.rate} JPY")
                 return self.rate
         except Exception as e:
-            self.logger.error(f"Error fetching exchange rate: {e}")
+            print(f"Error fetching exchange rate: {e}")
         
         # フォールバック値（設定可能にする）
         self.rate = float(os.getenv('FALLBACK_EXCHANGE_RATE', '185.0'))
-        self.logger.info(f"Using fallback exchange rate: 1 GBP = {self.rate} JPY")
+        print(f"Using fallback exchange rate: 1 GBP = {self.rate} JPY")
         return self.rate
 
 class DeepLTranslator:
@@ -78,12 +76,11 @@ class DeepLTranslator:
         self.quota_file = 'deepl_quota.json'
         self.quota_limit = 500000  # Free版の月間制限
         self.quota_used = 0
-        self.logger = logging.getLogger(__name__)
         self._load_cache()
         self._load_quota()
         
         if not self.enabled:
-            self.logger.warning("DeepL API key not configured")
+            print("Warning: DeepL API key not configured")
     
     def _load_cache(self):
         """翻訳キャッシュを読み込み"""
@@ -91,8 +88,7 @@ class DeepLTranslator:
             try:
                 with open(self.cache_file, 'r') as f:
                     self.cache = json.load(f)
-            except Exception as e:
-                self.logger.error(f"Error loading translation cache: {e}")
+            except:
                 self.cache = {}
     
     def _save_cache(self):
@@ -100,8 +96,8 @@ class DeepLTranslator:
         try:
             with open(self.cache_file, 'w') as f:
                 json.dump(self.cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self.logger.error(f"Error saving translation cache: {e}")
+        except:
+            pass
     
     def _load_quota(self):
         """クォータ使用状況を読み込み"""
@@ -116,8 +112,7 @@ class DeepLTranslator:
                         self.quota_used = data.get('used', 0)
                     else:
                         self.quota_used = 0
-            except Exception as e:
-                self.logger.error(f"Error loading quota: {e}")
+            except:
                 self.quota_used = 0
     
     def _save_quota(self):
@@ -128,14 +123,14 @@ class DeepLTranslator:
                     'month': datetime.now().strftime('%Y-%m'),
                     'used': self.quota_used
                 }, f)
-        except Exception as e:
-            self.logger.error(f"Error saving quota: {e}")
+        except:
+            pass
     
     def _check_quota(self, text: str) -> bool:
         """クォータチェック"""
         char_count = len(text)
         if self.quota_used + char_count > self.quota_limit * 0.9:  # 90%で警告
-            self.logger.warning(f"DeepL quota nearly exhausted ({self.quota_used}/{self.quota_limit})")
+            print(f"Warning: DeepL quota nearly exhausted ({self.quota_used}/{self.quota_limit})")
             return False
         return True
     
@@ -179,14 +174,14 @@ class DeepLTranslator:
                 
                 return translated
             elif response.status_code == 456:
-                self.logger.warning(f"DeepL API quota exceeded - using original text")
+                print(f"DeepL API quota exceeded - using original text")
                 return text
             else:
-                self.logger.error(f"DeepL API error: {response.status_code}")
+                print(f"DeepL API error: {response.status_code}")
                 return text
                 
         except Exception as e:
-            self.logger.error(f"Translation error: {e}")
+            print(f"Translation error: {e}")
             return text
     
     def translate_colors(self, colors: List[str], existing_map: Dict[str, str]) -> List[str]:
@@ -220,7 +215,6 @@ class DataProcessor:
         self.gbp_to_jpy = self.exchange_api.get_rate()
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
-        self.logger = logging.getLogger(__name__)
     
     def _generate_consistent_id(self, unique_key: str) -> int:
         """一貫性のあるIDを生成（hashlib使用）"""
@@ -279,11 +273,13 @@ class DataProcessor:
             
             record = self._add_japanese_fields(record, raw_data)
             
-            # full_model_ja の生成（ハイブリッド/電気情報保持）
-            record['model_ja'] = self.translator.translate(record['model_en']) if record['model_en'] != self.na_value else self.dash_value
             parts = [record['make_ja'], record['model_ja']]
-            parts.append(record['grade'] if record['grade'] and record['grade'] != self.na_value else self.dash_value)
-            parts.append(self._shorten_engine_text(record['engine']) if record['engine'] and record['engine'] != self.na_value else self.dash_value)
+            if record['grade'] and record['grade'] != self.na_value:
+                parts.append(record['grade'])
+            if record['engine'] and record['engine'] != self.na_value:
+                engine_short = self._shorten_engine_text(record['engine'])
+                if engine_short:
+                    parts.append(engine_short)
             record['full_model_ja'] = ' '.join(parts)
             
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
@@ -304,23 +300,21 @@ class DataProcessor:
         return str(value)
     
     def _shorten_engine_text(self, engine_text: str) -> str:
-        """エンジンテキストを短縮（ハイブリッド/電気情報保持）"""
+        """エンジンテキストを短縮"""
         if engine_text == self.na_value:
-            return self.dash_value
+            return ''
         
-        # ハイブリッド車の処理
-        if 'Hybrid' in engine_text or 'e:HEV' in engine_text:
-            match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
-            return f"{match.group(0)} HEV" if match else 'HEV'
+        match = re.search(r'(\d+\.?\d*)\s*[Ll]', engine_text)
+        if match:
+            return match.group(0)
         
-        # 電気自動車の処理
-        if 'kWh' in engine_text or 'Electric' in engine_text:
+        if 'kWh' in engine_text:
             match = re.search(r'([\d.]+)\s*kWh', engine_text)
-            return f"{match.group(1)}kWh" if match else 'EV'
+            if match:
+                return f"{match.group(1)}kWh"
         
-        # 通常のエンジンの処理
-        match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
-        return match.group(0) if match else engine_text.split()[0]
+        words = engine_text.split()
+        return words[0] if words else ''
     
     def _extract_base_data(self, raw_data: Dict) -> Dict:
         """基本データを抽出"""
@@ -434,6 +428,7 @@ class DataProcessor:
         }
         
         record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
+        record['model_ja'] = record['model_en']
         
         # body_type_jaのマッピング
         body_type_ja_map = {
