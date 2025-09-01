@@ -1,5 +1,4 @@
 name: Daily Carwow Sync
-
 on:
   schedule:
     # 日本時間 02:00（UTC 17:00 前日）
@@ -99,10 +98,14 @@ jobs:
         echo "Sync completed at $(date)"
     
     - name: Weekly cleanup (Sundays only)
-      if: github.event_name == 'schedule' && $(date +%u) == '7'
+      if: github.event_name == 'schedule'
       run: |
-        echo "Running weekly cleanup of inactive records..."
-        python sync_manager.py --cleanup 90
+        if [ "$(date +%u)" = "7" ]; then
+          echo "Running weekly cleanup of inactive records..."
+          python sync_manager.py --cleanup 90
+        else
+          echo "Not Sunday, skipping weekly cleanup"
+        fi
     
     - name: Upload logs and cache
       if: always()
