@@ -63,7 +63,7 @@ class CarwowScraper:
                         self.logger.info("Body type cache file is empty, will rebuild")
                         self.body_type_cache = {}
             except Exception as e:
-                self.logger.error(f"Error loading body type cache: {e}")
+                self.logger.error(f"Error loading body type cache: {e}", exc_info=True)
                 self.body_type_cache = {}
         else:
             self.logger.info("Body type cache file not found, will create new one")
@@ -75,7 +75,7 @@ class CarwowScraper:
             with open('body_type_cache.json', 'w') as f:
                 json.dump(self.body_type_cache, f, indent=2)
         except Exception as e:
-            self.logger.error(f"Error saving body type cache: {e}")
+            self.logger.error(f"Error saving body type cache: {e}", exc_info=True)
 
     def _build_body_type_cache(self):
         """全ボディタイプページをスクレイピングしてキャッシュを構築"""
@@ -91,7 +91,7 @@ class CarwowScraper:
                         self.body_type_cache[model_name].append(body_type)
                 self.logger.info(f"    Found {len(models)} models for {body_type}")
             except Exception as e:
-                self.logger.error(f"    Error fetching {body_type}: {e}")
+                self.logger.error(f"    Error fetching {body_type}: {e}", exc_info=True)
             time.sleep(RATE_LIMIT_DELAY)
         
         self._save_body_type_cache()
@@ -122,7 +122,7 @@ class CarwowScraper:
                     break
                 page += 1
             except Exception as e:
-                self.logger.error(f"    Error scraping body type page {page}: {e}")
+                self.logger.error(f"    Error scraping body type page {page}: {e}", exc_info=True)
                 break
         return models
 
@@ -359,7 +359,7 @@ class CarwowScraper:
                 'specifications': specifications
             }
         except Exception as e:
-            self.logger.error(f"    Error getting specifications: {e}")
+            self.logger.error(f"    Error getting specifications: {e}", exc_info=True)
             return self._extract_specs_from_main(slug)
 
     def _extract_grades_engines(self, soup: BeautifulSoup) -> List[Dict]:
@@ -525,8 +525,8 @@ class CarwowScraper:
                     color_name = re.sub(r'(Free|£[\d,]+).*$', '', color_text).strip()
                     if color_name and color_name not in colors:
                         colors.append(color_name)
-        except:
-            pass
+        except Exception as e:
+            self.logger.error(f"Error scraping colors for {slug}: {e}", exc_info=True)
         return colors if colors else self._extract_colors_from_main(slug)
 
     def _extract_colors_from_main(self, slug: str) -> List[str]:
@@ -547,5 +547,44 @@ class CarwowScraper:
                         if color in p_text and color.capitalize() not in colors:
                             colors.append(color.capitalize())
         except Exception as e:
-            self.logger.warning(f"Could not extract colors from main page: {e}")
+            self.logger.warning(f"Could not extract colors from main page: {e}", exc_info=True)
         return colors
+
+    def get_all_makers(self) -> List[str]:
+        """すべてのメーカー名を取得"""
+        try:
+            resp = self.session.get(f"{BASE_URL}/car-chooser", timeout=TIMEOUT_SEC)
+            time.sleep(RATE_LIMIT_DELAY)
+            if resp.status_code != 200:
+                return []
+            soup = BeautifulSoup(resp.text, 'lxml')
+            maker_links = soup.find_all('a', href=re.compile(r'^/[a-zA-Z0-9\-]+/models$'))
+            makers = [link['href'].split('/')[1] for link in maker_links]
+            return sorted(list(set(makers)))
+        except Exception as e:
+            self.logger.error(f"Error getting makers: {e}", exc_info=True)
+            return []
+
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """メーカーごとのモデルスラグを取得"""
+        try:
+            url = f"{BASE_URL}/{maker}/models"
+            resp = self.session.get(url, timeout=TIMEOUT_SEC)
+            time.sleep(RATE_LIMIT_DELAY)
+            if resp.status_code != 200:
+                return []
+            soup = BeautifulSoup(resp.text, 'lxml')
+            model_links = soup.find_all('a', href=re.compile(rf'^{maker}/[a-zA-Z0-9\-]+$'))
+            models = [link['href'] for link in model_links]
+            return sorted(list(set(models)))
+        except Exception as e:
+            self.logger.error(f"Error getting models for {maker}: {e}", exc_info=True)
+            return []
+
+    def cleanup(self):
+        """セッションを閉じる"""
+        try:
+            self.session.close()
+            self.logger.info("Closed HTTP session")
+        except Exception as e:
+            self.logger.error(f"Error closing session: {e}", exc_info=True)
