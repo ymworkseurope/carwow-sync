@@ -17,7 +17,6 @@ on:
         description: 'Run in test mode (process only 5 vehicles)'
         required: false
         default: 'false'
-
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -29,6 +28,7 @@ jobs:
       GS_CREDS_JSON: ${{ secrets.GS_CREDS_JSON }}
       GS_SHEET_ID: ${{ secrets.GS_SHEET_ID }}
       DEEPL_KEY: ${{ secrets.DEEPL_KEY }}
+      FALLBACK_EXCHANGE_RATE: ${{ secrets.FALLBACK_EXCHANGE_RATE || '185.0' }}
     
     steps:
     - name: Checkout code
@@ -45,10 +45,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: Create cache directory and files
+    - name: Create cache files
       run: |
-        mkdir -p cache
         touch body_type_cache.json
+        touch translation_cache.json
+        touch exchange_rate_cache.json
+        touch deepl_quota.json
         touch sync.log
     
     - name: Prepare arguments
@@ -87,6 +89,8 @@ jobs:
         path: |
           sync.log
           body_type_cache.json
-          cache/
+          translation_cache.json
+          exchange_rate_cache.json
+          deepl_quota.json
         retention-days: 7
         if-no-files-found: warn
