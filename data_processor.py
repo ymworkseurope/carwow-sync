@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-data_processor.py - データ処理モジュール（為替API・DeepL対応版）
-エンジン単位でレコードを生成
+data_processor.py - 修正版
+エンジン単位でレコードを生成、ID生成を改善
 """
 import re
 import json
 import os
 import time
+import hashlib
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import requests
@@ -38,7 +39,7 @@ class ExchangeRateAPI:
             return self.rate
         
         try:
-            # 無料の為替APIを使用 (exchangerate-api.com)
+            # 無料の為替APIを使用
             response = requests.get(
                 'https://api.exchangerate-api.com/v4/latest/GBP',
                 timeout=10
@@ -59,20 +60,24 @@ class ExchangeRateAPI:
         except Exception as e:
             print(f"Error fetching exchange rate: {e}")
         
-        # フォールバック値
-        self.rate = 185.0
+        # フォールバック値（設定可能にする）
+        self.rate = float(os.getenv('FALLBACK_EXCHANGE_RATE', '185.0'))
         print(f"Using fallback exchange rate: 1 GBP = {self.rate} JPY")
         return self.rate
 
 class DeepLTranslator:
-    """DeepL翻訳クラス"""
+    """DeepL翻訳クラス（クォータ管理付き）"""
     
     def __init__(self):
         self.api_key = os.getenv('DEEPL_KEY')
         self.enabled = bool(self.api_key)
         self.cache = {}
         self.cache_file = 'translation_cache.json'
+        self.quota_file = 'deepl_quota.json'
+        self.quota_limit = 500000  # Free版の月間制限
+        self.quota_used = 0
         self._load_cache()
+        self._load_quota()
         
         if not self.enabled:
             print("Warning: DeepL API key not configured")
@@ -94,9 +99,48 @@ class DeepLTranslator:
         except:
             pass
     
+    def _load_quota(self):
+        """クォータ使用状況を読み込み"""
+        if os.path.exists(self.quota_file):
+            try:
+                with open(self.quota_file, 'r') as f:
+                    data = json.load(f)
+                    # 月が変わったらリセット
+                    saved_month = data.get('month', '')
+                    current_month = datetime.now().strftime('%Y-%m')
+                    if saved_month == current_month:
+                        self.quota_used = data.get('used', 0)
+                    else:
+                        self.quota_used = 0
+            except:
+                self.quota_used = 0
+    
+    def _save_quota(self):
+        """クォータ使用状況を保存"""
+        try:
+            with open(self.quota_file, 'w') as f:
+                json.dump({
+                    'month': datetime.now().strftime('%Y-%m'),
+                    'used': self.quota_used
+                }, f)
+        except:
+            pass
+    
+    def _check_quota(self, text: str) -> bool:
+        """クォータチェック"""
+        char_count = len(text)
+        if self.quota_used + char_count > self.quota_limit * 0.9:  # 90%で警告
+            print(f"Warning: DeepL quota nearly exhausted ({self.quota_used}/{self.quota_limit})")
+            return False
+        return True
+    
     def translate(self, text: str, target_lang: str = 'JA') -> str:
         """テキストを翻訳"""
         if not self.enabled or not text or text == 'Information not available':
+            return text
+        
+        # クォータチェック
+        if not self._check_quota(text):
             return text
         
         # キャッシュチェック
@@ -120,14 +164,17 @@ class DeepLTranslator:
                 result = response.json()
                 translated = result['translations'][0]['text']
                 
+                # クォータ更新
+                self.quota_used += len(text)
+                self._save_quota()
+                
                 # キャッシュに保存
                 self.cache[cache_key] = translated
                 self._save_cache()
                 
                 return translated
             elif response.status_code == 456:
-                # Quota exceeded - 翻訳をスキップしてオリジナルを返す
-                print(f"DeepL API quota exceeded (456) - using original text")
+                print(f"DeepL API quota exceeded - using original text")
                 return text
             else:
                 print(f"DeepL API error: {response.status_code}")
@@ -168,6 +215,13 @@ class DataProcessor:
         self.gbp_to_jpy = self.exchange_api.get_rate()
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
+    
+    def _generate_consistent_id(self, unique_key: str) -> int:
+        """一貫性のあるIDを生成（hashlib使用）"""
+        # MD5ハッシュを使用して一貫性のあるIDを生成
+        hash_obj = hashlib.md5(unique_key.encode('utf-8'))
+        # 16進数の最初の8文字を10進数に変換
+        return int(hash_obj.hexdigest()[:8], 16)
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
@@ -231,8 +285,9 @@ class DataProcessor:
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
             record['updated_at'] = datetime.now().isoformat()
             
+            # 一貫性のあるID生成
             unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
-            record['id'] = abs(hash(unique_key)) % (10**9)
+            record['id'] = self._generate_consistent_id(unique_key)
             
             records.append(record)
         
@@ -375,7 +430,7 @@ class DataProcessor:
         record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
         record['model_ja'] = record['model_en']
         
-        # body_type_jaのマッピング（DeepLではなくマッピングを使用）
+        # body_type_jaのマッピング
         body_type_ja_map = {
             'SUV': 'SUV',
             'SUVs': 'SUV',
@@ -457,7 +512,7 @@ class DataProcessor:
         else:
             record['drive_type_ja'] = drive_ja_map.get(drive, self.dash_value)
         
-        # カラーの翻訳（既存マッピング優先、DeepL併用）
+        # カラーの翻訳
         color_ja_map = {
             'White': 'ホワイト',
             'Black': 'ブラック',
