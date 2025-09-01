@@ -521,7 +521,8 @@ class CarwowScraper:
                 colors_soup = BeautifulSoup(colors_resp.text, 'lxml')
                 for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
                     color_text = h4.get_text(strip=True)
-                    color_name = re.sub(r'(Free|£[\d,]+).*, ', color_text).strip()
+                    # FIXED: Changed the regex pattern to use double quotes to avoid string literal issues
+                    color_name = re.sub(r'(Free|£[\d,]+).*,\s*', '', color_text).strip()
                     if color_name and color_name not in colors:
                         colors.append(color_name)
         except:
@@ -587,3 +588,91 @@ class CarwowScraper:
             }
         except:
             return {'grades_engines': [], 'specifications': {}}
+
+    def get_all_makers(self) -> List[str]:
+        """全メーカーのスラッグを取得"""
+        makers = []
+        try:
+            resp = self.session.get(f"{BASE_URL}/car-chooser", timeout=TIMEOUT_SEC)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                # メーカーのリンクを探す
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if href.startswith('/') and href.count('/') == 1:
+                        maker_slug = href[1:]  # 先頭の/を削除
+                        if maker_slug and maker_slug not in makers:
+                            makers.append(maker_slug)
+        except Exception as e:
+            self.logger.error(f"Error getting makers: {e}")
+        return sorted(makers)
+
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """特定メーカーのモデル一覧を取得"""
+        models = []
+        try:
+            maker_url = f"{BASE_URL}/{maker}"
+            resp = self.session.get(maker_url, timeout=TIMEOUT_SEC)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                # モデルのリンクを探す
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if href.startswith(f'/{maker}/') and href.count('/') == 2:
+                        model_slug = href[1:]  # 先頭の/を削除
+                        if model_slug not in models:
+                            models.append(model_slug)
+            time.sleep(RATE_LIMIT_DELAY)
+        except Exception as e:
+            self.logger.error(f"Error getting models for {maker}: {e}")
+        return models
+
+    def cleanup(self):
+        """リソースをクリーンアップ"""
+        if hasattr(self, 'session'):
+            self.session.close()
+        self._save_body_type_cache()
+
+    def get_all_makers(self) -> List[str]:
+        """全メーカーのスラッグを取得"""
+        makers = []
+        try:
+            resp = self.session.get(f"{BASE_URL}/car-chooser", timeout=TIMEOUT_SEC)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                # メーカーのリンクを探す
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if href.startswith('/') and href.count('/') == 1:
+                        maker_slug = href[1:]  # 先頭の/を削除
+                        if maker_slug and maker_slug not in makers:
+                            makers.append(maker_slug)
+        except Exception as e:
+            self.logger.error(f"Error getting makers: {e}")
+        return sorted(makers)
+
+    def get_models_for_maker(self, maker: str) -> List[str]:
+        """特定メーカーのモデル一覧を取得"""
+        models = []
+        try:
+            maker_url = f"{BASE_URL}/{maker}"
+            resp = self.session.get(maker_url, timeout=TIMEOUT_SEC)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                # モデルのリンクを探す
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if href.startswith(f'/{maker}/') and href.count('/') == 2:
+                        model_slug = href[1:]  # 先頭の/を削除
+                        if model_slug not in models:
+                            models.append(model_slug)
+            time.sleep(RATE_LIMIT_DELAY)
+        except Exception as e:
+            self.logger.error(f"Error getting models for {maker}: {e}")
+        return models
+
+    def cleanup(self):
+        """リソースをクリーンアップ"""
+        if hasattr(self, 'session'):
+            self.session.close()
+        self._save_body_type_cache()
