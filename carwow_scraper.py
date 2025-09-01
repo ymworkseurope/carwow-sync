@@ -521,7 +521,7 @@ class CarwowScraper:
                 colors_soup = BeautifulSoup(colors_resp.text, 'lxml')
                 for h4 in colors_soup.find_all('h4', class_='model-hub__colour-details-title'):
                     color_text = h4.get_text(strip=True)
-                    color_name = re.sub(r'(Free|£[\d,]+).*, '', color_text).strip()
+                    color_name = re.sub(r'(Free|£[\d,]+).*, ', color_text).strip()
                     if color_name and color_name not in colors:
                         colors.append(color_name)
         except:
