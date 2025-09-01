@@ -1,4 +1,5 @@
 name: Daily Carwow Sync
+
 on:
   schedule:
     # 日本時間 02:00（UTC 17:00 前日）
@@ -17,19 +18,12 @@ on:
         description: 'Run in test mode (process only 5 vehicles)'
         required: false
         default: 'false'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      cleanup_days:
-        description: 'Delete inactive records older than X days (leave empty to skip)'
-        required: false
-        default: ''
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 90 || 240 }}
+    # 動的タイムアウト：テストモード60分、通常モード180分
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 60 || 180 }}
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -40,95 +34,66 @@ jobs:
       FALLBACK_EXCHANGE_RATE: ${{ secrets.FALLBACK_EXCHANGE_RATE || '185.0' }}
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Create cache files
-      run: |
-        touch body_type_cache.json
-        touch translation_cache.json
-        touch exchange_rate_cache.json
-        touch deepl_quota.json
-        touch sync.log
-        touch scraper.log
-        touch processor.log
-    
-    - name: Prepare arguments
-      id: prepare
-      run: |
-        ARGS=""
-        
-        # Test mode
-        if [ "${{ github.event.inputs.test_mode }}" = "true" ]; then
-          ARGS="$ARGS --test"
-        fi
-        
-        # Limit
-        if [ -n "${{ github.event.inputs.limit }}" ]; then
-          ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
-        fi
-        
-        # Makers
-        if [ -n "${{ github.event.inputs.makers }}" ]; then
-          ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
-        fi
-        
-        # Cleanup
-        if [ -n "${{ github.event.inputs.cleanup_days }}" ]; then
-          ARGS="$ARGS --cleanup ${{ github.event.inputs.cleanup_days }}"
-        fi
-        
-        echo "args=$ARGS" >> $GITHUB_OUTPUT
-    
-    - name: Run sync
-      run: |
-        echo "Starting sync at $(date)"
-        python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee -a sync.log
-        echo "Sync completed at $(date)"
-    
-    - name: Weekly cleanup (Sundays only)
-      if: github.event_name == 'schedule'
-      run: |
-        if [ "$(date +%u)" = "7" ]; then
-          echo "Running weekly cleanup of inactive records..."
-          python sync_manager.py --cleanup 90
-        else
-          echo "Not Sunday, skipping weekly cleanup"
-        fi
-    
-    - name: Upload logs and cache
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: sync-logs-${{ github.run_number }}
-        path: |
-          sync.log
-          scraper.log
-          processor.log
-          body_type_cache.json
-          translation_cache.json
-          exchange_rate_cache.json
-          deepl_quota.json
-        retention-days: 7
-        if-no-files-found: warn
-    
-    - name: Check for errors
-      if: failure()
-      run: |
-        echo "Sync failed. Checking logs for errors..."
-        if [ -f sync.log ]; then
-          echo "=== Last 50 lines of sync.log ==="
-          tail -n 50 sync.log
-        fi
-        exit 1
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Create cache files
+        run: |
+          touch body_type_cache.json
+          touch translation_cache.json
+          touch exchange_rate_cache.json
+          touch deepl_quota.json
+          touch sync.log
+      
+      - name: Prepare arguments
+        id: prepare
+        run: |
+          ARGS=""
+          
+          # Test mode
+          if [ "${{ github.event.inputs.test_mode }}" = "true" ]; then
+            ARGS="$ARGS --test"
+          fi
+          
+          # Limit
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
+          fi
+          
+          # Makers
+          if [ -n "${{ github.event.inputs.makers }}" ]; then
+            ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
+          fi
+          
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+      
+      - name: Run sync
+        run: |
+          echo "Starting sync at $(date)"
+          python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
+          echo "Sync completed at $(date)"
+      
+      - name: Upload logs and cache
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-logs-${{ github.run_number }}
+          path: |
+            sync.log
+            body_type_cache.json
+            translation_cache.json
+            exchange_rate_cache.json
+            deepl_quota.json
+          retention-days: 7
+          if-no-files-found: warn
