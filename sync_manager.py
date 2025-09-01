@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 sync_manager.py - Improved Version with UUID and Inactive Record Handling
