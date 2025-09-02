@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-data_processor.py - 完全版（重複防止機能付き）
-整数ID使用、full_model_ja改良、DeepL翻訳統合
+data_processor.py - 本番用完全版
+整数ID使用、full_model_ja改良、DeepL翻訳統合、ID生成ロジック修正版
 """
 import re
 import json
@@ -224,7 +224,7 @@ class DeepLTranslator:
         return translated
 
 class DataProcessor:
-    """データ処理クラス（重複防止機能付き）"""
+    """データ処理クラス"""
     
     def __init__(self):
         self.exchange_api = ExchangeRateAPI()
@@ -233,48 +233,46 @@ class DataProcessor:
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
     
-    def _normalize_for_id(self, value: str) -> str:
-        """ID生成用の値を正規化"""
-        if not value or value in [self.na_value, self.dash_value, '', 'N/A', '-', None]:
-            return 'UNKNOWN'
+    def _normalize_for_id(self, value: Any) -> str:
+        """ID生成用の値正規化"""
+        if value is None or value == '' or value in [self.na_value, self.dash_value, 'N/A', '-']:
+            return 'NONE'
         
-        # 文字列を正規化
-        normalized = str(value).strip().lower()
-        # 余分なスペースを削除してアンダースコアに置換
-        normalized = re.sub(r'\s+', '_', normalized)
-        # 特殊文字を削除（英数字、ハイフン、ドット、アンダースコアのみ保持）
-        normalized = re.sub(r'[^\w\-\.]', '', normalized)
+        if isinstance(value, str):
+            # 特殊文字を除去し、空白を統一
+            normalized = re.sub(r'[^\w\s]', '', value.lower().strip())
+            normalized = re.sub(r'\s+', '_', normalized)
+            return normalized if normalized else 'NONE'
         
-        return normalized
+        return str(value)
     
-    def _generate_consistent_id(self, slug: str, grade: str, engine: str) -> int:
-        """重複を防ぐ一貫性のある整数IDを生成"""
-        # 各値を正規化
-        norm_slug = self._normalize_for_id(slug)
-        norm_grade = self._normalize_for_id(grade)
-        norm_engine = self._normalize_for_id(engine)
-        
-        # gradeとengineが両方ともUNKNOWNでない場合のみ追加
-        if norm_grade != 'UNKNOWN' or norm_engine != 'UNKNOWN':
-            unique_key = f"{norm_slug}_{norm_grade}_{norm_engine}"
-        else:
-            # グレード・エンジン情報がない場合は、slugのみでID生成
-            unique_key = norm_slug
-        
-        # MD5ハッシュで一貫性のある整数IDを生成
-        hash_obj = hashlib.md5(unique_key.encode('utf-8'))
-        generated_id = int(hash_obj.hexdigest()[:8], 16) % 2147483647
-        
-        # IDが0になるのを防ぐ
-        if generated_id == 0:
-            generated_id = 1
+    def _generate_consistent_id(self, unique_key: str) -> int:
+        """一貫性のある整数IDを生成（修正版）"""
+        # unique_keyをパースして各要素を正規化
+        parts = unique_key.split('_')
+        if len(parts) >= 3:
+            slug = parts[0]
+            grade = '_'.join(parts[1:-1]) if len(parts) > 3 else parts[1]
+            engine = parts[-1]
             
-        return generated_id
+            # 各要素を正規化
+            normalized_slug = self._normalize_for_id(slug)
+            normalized_grade = self._normalize_for_id(grade)
+            normalized_engine = self._normalize_for_id(engine)
+            
+            # より安定したキーを作成
+            stable_key = f"{normalized_slug}__{normalized_grade}__{normalized_engine}"
+        else:
+            # フォールバック：元のキーをそのまま使用
+            stable_key = self._normalize_for_id(unique_key)
+        
+        hash_obj = hashlib.md5(stable_key.encode('utf-8'))
+        return int(hash_obj.hexdigest()[:8], 16) % 2147483647
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
         車両データを処理してデータベース用レコードに変換
-        エンジン単位で別レコードとして返す（重複防止機能付き）
+        エンジン単位で別レコードとして返す
         """
         if not raw_data:
             return []
@@ -295,9 +293,6 @@ class DataProcessor:
                 'power_bhp': None
             }]
         
-        # 重複チェック用のセット
-        seen_combinations = set()
-        
         for grade_engine in grades_engines:
             record = base_data.copy()
             
@@ -306,23 +301,6 @@ class DataProcessor:
             record['fuel'] = self._normalize_value(grade_engine.get('fuel'), self.na_value)
             record['transmission'] = self._normalize_value(grade_engine.get('transmission'), self.na_value)
             record['drive_type'] = self._normalize_value(grade_engine.get('drive_type'), self.na_value)
-            
-            # 組み合わせの重複チェック
-            combination_key = f"{record['grade']}_{record['engine']}_{record['fuel']}"
-            if combination_key in seen_combinations:
-                # 重複する組み合わせの場合は、価格や出力で区別を試みる
-                power_bhp = grade_engine.get('power_bhp')
-                engine_price = grade_engine.get('engine_price_gbp')
-                
-                if power_bhp:
-                    combination_key += f"_{power_bhp}bhp"
-                elif engine_price:
-                    combination_key += f"_{engine_price}gbp"
-                else:
-                    # それでも重複する場合はスキップ
-                    continue
-            
-            seen_combinations.add(combination_key)
             
             power_bhp = grade_engine.get('power_bhp')
             record['power_bhp'] = self.na_value if power_bhp is None else power_bhp
@@ -341,7 +319,7 @@ class DataProcessor:
             
             record = self._add_japanese_fields(record, raw_data)
             
-            # full_model_ja の構築
+            # full_model_ja の構築（改良版）
             parts = []
             
             # make_ja と model_ja は必須
@@ -367,12 +345,9 @@ class DataProcessor:
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
             
-            # 整数IDを生成
-            record['id'] = self._generate_consistent_id(
-                raw_data.get('slug', ''),
-                record['grade'],
-                record['engine']
-            )
+            # 修正された整数IDを生成（Supabase用）
+            unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
+            record['id'] = self._generate_consistent_id(unique_key)
             
             records.append(record)
         
@@ -417,6 +392,75 @@ class DataProcessor:
     def _extract_base_data(self, raw_data: Dict) -> Dict:
         """基本データを抽出"""
         specs = raw_data.get('specifications', {})
+        if specs:
+            spec_json['additional_specs'] = {
+                'boot_capacity_l': specs.get('boot_capacity_l'),
+                'wheelbase_m': specs.get('wheelbase_m'),
+                'turning_circle_m': specs.get('turning_circle_m'),
+                'battery_capacity_kwh': specs.get('battery_capacity_kwh')
+            }
+        
+        return spec_json
+    
+    def _parse_engine_details(self, engine_text: str) -> Dict:
+        """エンジン情報を詳細にパース"""
+        details = {}
+        
+        if engine_text == self.na_value:
+            return details
+        
+        electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
+        if electric_match:
+            details['type'] = 'Electric'
+            details['power_kw'] = int(electric_match.group(1))
+            details['battery_kwh'] = float(electric_match.group(2))
+            details['power_hp'] = int(details['power_kw'] * 1.341)
+            return details
+        
+        size_match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
+        if size_match:
+            details['engine_size_l'] = float(size_match.group(1))
+        
+        hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
+        if hp_match:
+            details['power_hp'] = int(hp_match.group(1))
+        
+        kw_match = re.search(r'(\d+)\s*kW', engine_text)
+        if kw_match:
+            details['power_kw'] = int(kw_match.group(1))
+            if 'power_hp' not in details:
+                details['power_hp'] = int(details['power_kw'] * 1.341)
+        
+        torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
+        if torque_match:
+            details['torque'] = torque_match.group(0)
+        
+        if 'petrol' in engine_text.lower():
+            details['type'] = 'Petrol'
+        elif 'diesel' in engine_text.lower():
+            details['type'] = 'Diesel'
+        elif 'hybrid' in engine_text.lower():
+            details['type'] = 'Hybrid'
+        
+        return details
+    
+    def _format_dimensions_ja(self, dimensions_mm: str) -> str:
+        """寸法を日本語形式にフォーマット"""
+        if not dimensions_mm or dimensions_mm == self.na_value:
+            return self.dash_value
+        
+        # カンマ区切りの数字を含む場合に対応
+        numbers = re.findall(r'[\d,]+', dimensions_mm)
+        
+        if len(numbers) >= 3:
+            # カンマを除去して数値に変換
+            length = int(numbers[0].replace(',', ''))
+            width = int(numbers[1].replace(',', ''))
+            height = int(numbers[2].replace(',', ''))
+            
+            return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
+        
+        return dimensions_mm.get('specifications', {})
         prices = raw_data.get('prices', {})
         
         # body_typeの処理
@@ -670,73 +714,4 @@ class DataProcessor:
         if engine_text and engine_text != self.na_value:
             spec_json['engine_parsed'] = self._parse_engine_details(engine_text)
         
-        specs = raw_data.get('specifications', {})
-        if specs:
-            spec_json['additional_specs'] = {
-                'boot_capacity_l': specs.get('boot_capacity_l'),
-                'wheelbase_m': specs.get('wheelbase_m'),
-                'turning_circle_m': specs.get('turning_circle_m'),
-                'battery_capacity_kwh': specs.get('battery_capacity_kwh')
-            }
-        
-        return spec_json
-    
-    def _parse_engine_details(self, engine_text: str) -> Dict:
-        """エンジン情報を詳細にパース"""
-        details = {}
-        
-        if engine_text == self.na_value:
-            return details
-        
-        electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
-        if electric_match:
-            details['type'] = 'Electric'
-            details['power_kw'] = int(electric_match.group(1))
-            details['battery_kwh'] = float(electric_match.group(2))
-            details['power_hp'] = int(details['power_kw'] * 1.341)
-            return details
-        
-        size_match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
-        if size_match:
-            details['engine_size_l'] = float(size_match.group(1))
-        
-        hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
-        if hp_match:
-            details['power_hp'] = int(hp_match.group(1))
-        
-        kw_match = re.search(r'(\d+)\s*kW', engine_text)
-        if kw_match:
-            details['power_kw'] = int(kw_match.group(1))
-            if 'power_hp' not in details:
-                details['power_hp'] = int(details['power_kw'] * 1.341)
-        
-        torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
-        if torque_match:
-            details['torque'] = torque_match.group(0)
-        
-        if 'petrol' in engine_text.lower():
-            details['type'] = 'Petrol'
-        elif 'diesel' in engine_text.lower():
-            details['type'] = 'Diesel'
-        elif 'hybrid' in engine_text.lower():
-            details['type'] = 'Hybrid'
-        
-        return details
-    
-    def _format_dimensions_ja(self, dimensions_mm: str) -> str:
-        """寸法を日本語形式にフォーマット"""
-        if not dimensions_mm or dimensions_mm == self.na_value:
-            return self.dash_value
-        
-        # カンマ区切りの数字を含む場合に対応
-        numbers = re.findall(r'[\d,]+', dimensions_mm)
-        
-        if len(numbers) >= 3:
-            # カンマを除去して数値に変換
-            length = int(numbers[0].replace(',', ''))
-            width = int(numbers[1].replace(',', ''))
-            height = int(numbers[2].replace(',', ''))
-            
-            return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
-        
-        return dimensions_mm
+        specs = raw_data
