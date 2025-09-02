@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-data_processor.py - 本番用完全版
+data_processor.py - 完全版（重複防止機能付き）
 整数ID使用、full_model_ja改良、DeepL翻訳統合
 """
 import re
@@ -224,7 +224,7 @@ class DeepLTranslator:
         return translated
 
 class DataProcessor:
-    """データ処理クラス"""
+    """データ処理クラス（重複防止機能付き）"""
     
     def __init__(self):
         self.exchange_api = ExchangeRateAPI()
@@ -233,18 +233,48 @@ class DataProcessor:
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
     
-    def _generate_consistent_id(self, unique_key: str) -> int:
-        """一貫性のある整数IDを生成（Supabase用）"""
-        # MD5ハッシュを使用して一貫性のある整数IDを生成
+    def _normalize_for_id(self, value: str) -> str:
+        """ID生成用の値を正規化"""
+        if not value or value in [self.na_value, self.dash_value, '', 'N/A', '-', None]:
+            return 'UNKNOWN'
+        
+        # 文字列を正規化
+        normalized = str(value).strip().lower()
+        # 余分なスペースを削除してアンダースコアに置換
+        normalized = re.sub(r'\s+', '_', normalized)
+        # 特殊文字を削除（英数字、ハイフン、ドット、アンダースコアのみ保持）
+        normalized = re.sub(r'[^\w\-\.]', '', normalized)
+        
+        return normalized
+    
+    def _generate_consistent_id(self, slug: str, grade: str, engine: str) -> int:
+        """重複を防ぐ一貫性のある整数IDを生成"""
+        # 各値を正規化
+        norm_slug = self._normalize_for_id(slug)
+        norm_grade = self._normalize_for_id(grade)
+        norm_engine = self._normalize_for_id(engine)
+        
+        # gradeとengineが両方ともUNKNOWNでない場合のみ追加
+        if norm_grade != 'UNKNOWN' or norm_engine != 'UNKNOWN':
+            unique_key = f"{norm_slug}_{norm_grade}_{norm_engine}"
+        else:
+            # グレード・エンジン情報がない場合は、slugのみでID生成
+            unique_key = norm_slug
+        
+        # MD5ハッシュで一貫性のある整数IDを生成
         hash_obj = hashlib.md5(unique_key.encode('utf-8'))
-        # 最初の8バイトを使用して正の整数を生成（32ビット整数の範囲内）
-        # PostgreSQLのINTEGER型の最大値は2147483647
-        return int(hash_obj.hexdigest()[:8], 16) % 2147483647
+        generated_id = int(hash_obj.hexdigest()[:8], 16) % 2147483647
+        
+        # IDが0になるのを防ぐ
+        if generated_id == 0:
+            generated_id = 1
+            
+        return generated_id
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
         車両データを処理してデータベース用レコードに変換
-        エンジン単位で別レコードとして返す
+        エンジン単位で別レコードとして返す（重複防止機能付き）
         """
         if not raw_data:
             return []
@@ -265,6 +295,9 @@ class DataProcessor:
                 'power_bhp': None
             }]
         
+        # 重複チェック用のセット
+        seen_combinations = set()
+        
         for grade_engine in grades_engines:
             record = base_data.copy()
             
@@ -273,6 +306,23 @@ class DataProcessor:
             record['fuel'] = self._normalize_value(grade_engine.get('fuel'), self.na_value)
             record['transmission'] = self._normalize_value(grade_engine.get('transmission'), self.na_value)
             record['drive_type'] = self._normalize_value(grade_engine.get('drive_type'), self.na_value)
+            
+            # 組み合わせの重複チェック
+            combination_key = f"{record['grade']}_{record['engine']}_{record['fuel']}"
+            if combination_key in seen_combinations:
+                # 重複する組み合わせの場合は、価格や出力で区別を試みる
+                power_bhp = grade_engine.get('power_bhp')
+                engine_price = grade_engine.get('engine_price_gbp')
+                
+                if power_bhp:
+                    combination_key += f"_{power_bhp}bhp"
+                elif engine_price:
+                    combination_key += f"_{engine_price}gbp"
+                else:
+                    # それでも重複する場合はスキップ
+                    continue
+            
+            seen_combinations.add(combination_key)
             
             power_bhp = grade_engine.get('power_bhp')
             record['power_bhp'] = self.na_value if power_bhp is None else power_bhp
@@ -291,7 +341,7 @@ class DataProcessor:
             
             record = self._add_japanese_fields(record, raw_data)
             
-            # full_model_ja の構築（改良版）
+            # full_model_ja の構築
             parts = []
             
             # make_ja と model_ja は必須
@@ -317,9 +367,12 @@ class DataProcessor:
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
             
-            # 整数IDを生成（Supabase用）
-            unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
-            record['id'] = self._generate_consistent_id(unique_key)
+            # 整数IDを生成
+            record['id'] = self._generate_consistent_id(
+                raw_data.get('slug', ''),
+                record['grade'],
+                record['engine']
+            )
             
             records.append(record)
         
