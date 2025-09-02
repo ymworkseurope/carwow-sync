@@ -94,10 +94,27 @@ jobs:
         
         echo "args=$ARGS" >> $GITHUB_OUTPUT
     
+    - name: Check files
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Files in directory:"
+        ls -la
+        echo "Python version:"
+        python --version
+        echo "Python modules:"
+        pip list
+    
     - name: Run sync
       run: |
         echo "Starting sync at $(date)"
-        python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
+        if [ -f "sync_manager.py" ]; then
+          python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
+        else
+          echo "ERROR: sync_manager.py not found!"
+          echo "Available files:"
+          ls -la
+          exit 1
+        fi
         echo "Sync completed at $(date)"
     
     - name: Save cache
