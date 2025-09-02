@@ -341,6 +341,7 @@ class DataProcessor:
             # 半角スペースで結合
             record['full_model_ja'] = ' '.join(parts)
             
+            # spec_jsonを生成
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
@@ -392,75 +393,6 @@ class DataProcessor:
     def _extract_base_data(self, raw_data: Dict) -> Dict:
         """基本データを抽出"""
         specs = raw_data.get('specifications', {})
-        if specs:
-            spec_json['additional_specs'] = {
-                'boot_capacity_l': specs.get('boot_capacity_l'),
-                'wheelbase_m': specs.get('wheelbase_m'),
-                'turning_circle_m': specs.get('turning_circle_m'),
-                'battery_capacity_kwh': specs.get('battery_capacity_kwh')
-            }
-        
-        return spec_json
-    
-    def _parse_engine_details(self, engine_text: str) -> Dict:
-        """エンジン情報を詳細にパース"""
-        details = {}
-        
-        if engine_text == self.na_value:
-            return details
-        
-        electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
-        if electric_match:
-            details['type'] = 'Electric'
-            details['power_kw'] = int(electric_match.group(1))
-            details['battery_kwh'] = float(electric_match.group(2))
-            details['power_hp'] = int(details['power_kw'] * 1.341)
-            return details
-        
-        size_match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
-        if size_match:
-            details['engine_size_l'] = float(size_match.group(1))
-        
-        hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
-        if hp_match:
-            details['power_hp'] = int(hp_match.group(1))
-        
-        kw_match = re.search(r'(\d+)\s*kW', engine_text)
-        if kw_match:
-            details['power_kw'] = int(kw_match.group(1))
-            if 'power_hp' not in details:
-                details['power_hp'] = int(details['power_kw'] * 1.341)
-        
-        torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
-        if torque_match:
-            details['torque'] = torque_match.group(0)
-        
-        if 'petrol' in engine_text.lower():
-            details['type'] = 'Petrol'
-        elif 'diesel' in engine_text.lower():
-            details['type'] = 'Diesel'
-        elif 'hybrid' in engine_text.lower():
-            details['type'] = 'Hybrid'
-        
-        return details
-    
-    def _format_dimensions_ja(self, dimensions_mm: str) -> str:
-        """寸法を日本語形式にフォーマット"""
-        if not dimensions_mm or dimensions_mm == self.na_value:
-            return self.dash_value
-        
-        # カンマ区切りの数字を含む場合に対応
-        numbers = re.findall(r'[\d,]+', dimensions_mm)
-        
-        if len(numbers) >= 3:
-            # カンマを除去して数値に変換
-            length = int(numbers[0].replace(',', ''))
-            width = int(numbers[1].replace(',', ''))
-            height = int(numbers[2].replace(',', ''))
-            
-            return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
-        
-        return dimensions_mm.get('specifications', {})
         prices = raw_data.get('prices', {})
         
         # body_typeの処理
@@ -714,4 +646,73 @@ class DataProcessor:
         if engine_text and engine_text != self.na_value:
             spec_json['engine_parsed'] = self._parse_engine_details(engine_text)
         
-        specs = raw_data
+        specs = raw_data.get('specifications', {})
+        if specs:
+            spec_json['additional_specs'] = {
+                'boot_capacity_l': specs.get('boot_capacity_l'),
+                'wheelbase_m': specs.get('wheelbase_m'),
+                'turning_circle_m': specs.get('turning_circle_m'),
+                'battery_capacity_kwh': specs.get('battery_capacity_kwh')
+            }
+        
+        return spec_json
+    
+    def _parse_engine_details(self, engine_text: str) -> Dict:
+        """エンジン情報を詳細にパース"""
+        details = {}
+        
+        if engine_text == self.na_value:
+            return details
+        
+        electric_match = re.search(r'(\d+)\s*kW\s+([\d.]+)\s*kWh', engine_text)
+        if electric_match:
+            details['type'] = 'Electric'
+            details['power_kw'] = int(electric_match.group(1))
+            details['battery_kwh'] = float(electric_match.group(2))
+            details['power_hp'] = int(details['power_kw'] * 1.341)
+            return details
+        
+        size_match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
+        if size_match:
+            details['engine_size_l'] = float(size_match.group(1))
+        
+        hp_match = re.search(r'(\d+)\s*(?:hp|bhp)', engine_text, re.IGNORECASE)
+        if hp_match:
+            details['power_hp'] = int(hp_match.group(1))
+        
+        kw_match = re.search(r'(\d+)\s*kW', engine_text)
+        if kw_match:
+            details['power_kw'] = int(kw_match.group(1))
+            if 'power_hp' not in details:
+                details['power_hp'] = int(details['power_kw'] * 1.341)
+        
+        torque_match = re.search(r'(\d+)\s*(?:Nm|lb-ft)', engine_text)
+        if torque_match:
+            details['torque'] = torque_match.group(0)
+        
+        if 'petrol' in engine_text.lower():
+            details['type'] = 'Petrol'
+        elif 'diesel' in engine_text.lower():
+            details['type'] = 'Diesel'
+        elif 'hybrid' in engine_text.lower():
+            details['type'] = 'Hybrid'
+        
+        return details
+    
+    def _format_dimensions_ja(self, dimensions_mm: str) -> str:
+        """寸法を日本語形式にフォーマット"""
+        if not dimensions_mm or dimensions_mm == self.na_value:
+            return self.dash_value
+        
+        # カンマ区切りの数字を含む場合に対応
+        numbers = re.findall(r'[\d,]+', dimensions_mm)
+        
+        if len(numbers) >= 3:
+            # カンマを除去して数値に変換
+            length = int(numbers[0].replace(',', ''))
+            width = int(numbers[1].replace(',', ''))
+            height = int(numbers[2].replace(',', ''))
+            
+            return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
+        
+        return dimensions_mm
