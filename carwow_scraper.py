@@ -546,8 +546,7 @@ class CarwowScraper:
             time.sleep(RATE_LIMIT_DELAY)
             
             if main_resp.status_code == 200:
-                soup = BeautifulSoup(main_resp.text, '
-                                     soup = BeautifulSoup(main_resp.text, 'lxml')
+                soup = BeautifulSoup(main_resp.text, 'lxml')
                 color_keywords = ['white', 'black', 'silver', 'grey', 'blue', 'red', 'green', 'yellow', 'orange', 'brown']
                 
                 for p in soup.find_all('p'):
