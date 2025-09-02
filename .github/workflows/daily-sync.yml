@@ -26,8 +26,8 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # タイムアウトを動的に設定（テストモード: 60分、通常: 180分）
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 60 || 180 }}
+    # タイムアウトを動的に設定（テストモード: 30分、通常: 60分、制限付き）
+    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 30 || github.event.inputs.limit && 60 || 120 }}
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -94,6 +94,18 @@ jobs:
         
         echo "args=$ARGS" >> $GITHUB_OUTPUT
     
+    - name: Debug Environment
+      run: |
+        echo "=== Debug Information ==="
+        echo "GitHub Event: ${{ github.event_name }}"
+        echo "Test Mode: ${{ github.event.inputs.test_mode }}"
+        echo "Environment variables set:"
+        echo "SUPABASE_URL: ${{ env.SUPABASE_URL != '' && 'SET' || 'NOT SET' }}"
+        echo "SUPABASE_KEY: ${{ env.SUPABASE_KEY != '' && 'SET' || 'NOT SET' }}"
+        echo "GS_CREDS_JSON: ${{ env.GS_CREDS_JSON != '' && 'SET' || 'NOT SET' }}"
+        echo "GS_SHEET_ID: ${{ env.GS_SHEET_ID != '' && 'SET' || 'NOT SET' }}"
+        echo "DEEPL_KEY: ${{ env.DEEPL_KEY != '' && 'SET' || 'NOT SET' }}"
+    
     - name: Check files
       run: |
         echo "Current directory: $(pwd)"
@@ -108,7 +120,12 @@ jobs:
       run: |
         echo "Starting sync at $(date)"
         if [ -f "sync_manager.py" ]; then
-          python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log
+          python sync_manager.py ${{ steps.prepare.outputs.args }} --test 2>&1 | tee sync.log || {
+            echo "=== Script failed with exit code: $? ==="
+            echo "=== Last 50 lines of sync.log ==="
+            tail -50 sync.log
+            exit 1
+          }
         else
           echo "ERROR: sync_manager.py not found!"
           echo "Available files:"
