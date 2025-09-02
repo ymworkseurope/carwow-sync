@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 本番用完全版
+carwow_scraper.py - 本番用完全版（構文エラー修正版）
 """
 import re
 import json
@@ -546,7 +546,8 @@ class CarwowScraper:
             time.sleep(RATE_LIMIT_DELAY)
             
             if main_resp.status_code == 200:
-                soup = BeautifulSoup(main_resp.text, 'lxml')
+                soup = BeautifulSoup(main_resp.text, '
+                                     soup = BeautifulSoup(main_resp.text, 'lxml')
                 color_keywords = ['white', 'black', 'silver', 'grey', 'blue', 'red', 'green', 'yellow', 'orange', 'brown']
                 
                 for p in soup.find_all('p'):
@@ -565,9 +566,8 @@ class CarwowScraper:
             main_resp = self.session.get(main_url, timeout=TIMEOUT_SEC, allow_redirects=False)
             time.sleep(RATE_LIMIT_DELAY)
             
-            if 300 <= main_resp.status_code < 400 or main_resp.status_code != 200
-            続きをそのまま書きます：
-python                return {'grades_engines': [], 'specifications': {}}
+            if 300 <= main_resp.status_code < 400 or main_resp.status_code != 200:
+                return {'grades_engines': [], 'specifications': {}}
                 
             soup = BeautifulSoup(main_resp.text, 'lxml')
             text = soup.get_text()
