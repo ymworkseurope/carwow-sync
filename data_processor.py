@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-data_processor.py - 修正版
-UUID使用、full_model_ja改良、DeepL翻訳統合
+data_processor.py - 本番用完全版
+整数ID使用、full_model_ja改良、DeepL翻訳統合
 """
 import re
 import json
 import os
 import time
-import uuid
+import hashlib
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -34,10 +34,12 @@ class ExchangeRateAPI:
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'r') as f:
-                    cache = json.load(f)
-                    if time.time() - cache.get('timestamp', 0) < self.cache_duration:
-                        self.rate = cache.get('rate')
-                        logger.info(f"Using cached exchange rate: 1 GBP = {self.rate} JPY")
+                    content = f.read()
+                    if content.strip():
+                        cache = json.loads(content)
+                        if time.time() - cache.get('timestamp', 0) < self.cache_duration:
+                            self.rate = cache.get('rate')
+                            logger.info(f"Using cached exchange rate: 1 GBP = {self.rate} JPY")
             except Exception as e:
                 logger.error(f"Error loading exchange rate cache: {e}")
     
@@ -95,8 +97,10 @@ class DeepLTranslator:
         if os.path.exists(self.cache_file):
             try:
                 with open(self.cache_file, 'r') as f:
-                    self.cache = json.load(f)
-                    logger.info(f"Loaded translation cache with {len(self.cache)} entries")
+                    content = f.read()
+                    if content.strip():
+                        self.cache = json.loads(content)
+                        logger.info(f"Loaded translation cache with {len(self.cache)} entries")
             except Exception as e:
                 logger.error(f"Error loading translation cache: {e}")
                 self.cache = {}
@@ -114,14 +118,16 @@ class DeepLTranslator:
         if os.path.exists(self.quota_file):
             try:
                 with open(self.quota_file, 'r') as f:
-                    data = json.load(f)
-                    # 月が変わったらリセット
-                    saved_month = data.get('month', '')
-                    current_month = datetime.now().strftime('%Y-%m')
-                    if saved_month == current_month:
-                        self.quota_used = data.get('used', 0)
-                    else:
-                        self.quota_used = 0
+                    content = f.read()
+                    if content.strip():
+                        data = json.loads(content)
+                        # 月が変わったらリセット
+                        saved_month = data.get('month', '')
+                        current_month = datetime.now().strftime('%Y-%m')
+                        if saved_month == current_month:
+                            self.quota_used = data.get('used', 0)
+                        else:
+                            self.quota_used = 0
             except Exception as e:
                 logger.error(f"Error loading quota: {e}")
                 self.quota_used = 0
@@ -227,10 +233,13 @@ class DataProcessor:
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
     
-    def _generate_consistent_id(self, unique_key: str) -> str:
-        """UUIDを使用した一貫性のあるID生成"""
-        # UUID v4を使用してユニークなIDを生成
-        return str(uuid.uuid4())
+    def _generate_consistent_id(self, unique_key: str) -> int:
+        """一貫性のある整数IDを生成（Supabase用）"""
+        # MD5ハッシュを使用して一貫性のある整数IDを生成
+        hash_obj = hashlib.md5(unique_key.encode('utf-8'))
+        # 最初の8バイトを使用して正の整数を生成（32ビット整数の範囲内）
+        # PostgreSQLのINTEGER型の最大値は2147483647
+        return int(hash_obj.hexdigest()[:8], 16) % 2147483647
     
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
@@ -283,28 +292,32 @@ class DataProcessor:
             record = self._add_japanese_fields(record, raw_data)
             
             # full_model_ja の構築（改良版）
-            parts = [record['make_ja'], record['model_ja']]
+            parts = []
             
-            # グレードを追加（空の場合は「ー」）
-            if record['grade'] and record['grade'] != self.na_value:
+            # make_ja と model_ja は必須
+            if record['make_ja']:
+                parts.append(record['make_ja'])
+            if record['model_ja'] and record['model_ja'] != self.dash_value:
+                parts.append(record['model_ja'])
+            
+            # grade を追加（有効な値の場合のみ）
+            if record['grade'] and record['grade'] not in [self.na_value, self.dash_value, '']:
                 parts.append(record['grade'])
-            else:
-                parts.append(self.dash_value)
             
-            # エンジンを短縮して追加（ハイブリッド/EV情報を保持）
-            if record['engine'] and record['engine'] != self.na_value:
+            # engine を短縮して追加（有効な値の場合のみ）
+            if record['engine'] and record['engine'] not in [self.na_value, self.dash_value, '']:
                 engine_short = self._shorten_engine_text(record['engine'])
-                parts.append(engine_short)
-            else:
-                parts.append(self.dash_value)
+                if engine_short and engine_short != self.dash_value:
+                    parts.append(engine_short)
             
+            # 半角スペースで結合
             record['full_model_ja'] = ' '.join(parts)
             
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
             
-            # UUIDを使用したID生成
+            # 整数IDを生成（Supabase用）
             unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
             record['id'] = self._generate_consistent_id(unique_key)
             
@@ -320,8 +333,8 @@ class DataProcessor:
     
     def _shorten_engine_text(self, engine_text: str) -> str:
         """エンジンテキストを短縮（ハイブリッド/EV情報を保持）"""
-        if engine_text == self.na_value:
-            return self.dash_value
+        if engine_text == self.na_value or not engine_text:
+            return ''
         
         # ハイブリッドエンジンの処理
         if 'Hybrid' in engine_text or 'e:HEV' in engine_text or 'PHEV' in engine_text:
@@ -407,6 +420,7 @@ class DataProcessor:
             'BMW': 'BMW',
             'Bmw': 'BMW',
             'BYD': 'BYD',
+            'Byd': 'BYD',
             'Citroen': 'シトロエン',
             'Cupra': 'クプラ',
             'Dacia': 'ダチア',
@@ -461,7 +475,7 @@ class DataProcessor:
         
         record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
         
-        # model_jaをDeepLで翻訳（改良版）
+        # model_jaをDeepLで翻訳
         if record['model_en'] and record['model_en'] != self.na_value:
             record['model_ja'] = self.translator.translate(record['model_en'])
         else:
