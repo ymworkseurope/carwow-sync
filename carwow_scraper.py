@@ -561,3 +561,64 @@ class CarwowScraper:
     def _extract_specs_from_main(self, slug: str) -> Dict:
         """メインページから仕様を抽出"""
         try:
+            main_url = f"{BASE_URL}/{slug}"
+            main_resp = self.session.get(main_url, timeout=TIMEOUT_SEC, allow_redirects=False)
+            time.sleep(RATE_LIMIT_DELAY)
+            
+            if 300 <= main_resp.status_code < 400 or main_resp.status_code != 200:
+                return {'grades_engines': [], 'specifications': {}}
+                
+            soup = BeautifulSoup(main_resp.text, 'lxml')
+            text = soup.get_text()
+            
+            # デフォルトのグレード情報
+            grade_info = {
+                'grade': 'Information not available',
+                'engine': 'Information not available',
+                'engine_price_gbp': None,
+                'fuel': 'Electric' if 'electric' in text.lower() else 'Information not available',
+                'transmission': 'Automatic' if 'electric' in text.lower() else 'Information not available',
+                'drive_type': 'Information not available',
+                'power_bhp': None
+            }
+            
+            # 仕様情報の抽出
+            specs = {}
+            
+            # at-a-glance セクションから情報を取得
+            at_glance = soup.find('div', class_='review-overview__at-a-glance-model')
+            if at_glance:
+                headings = at_glance.find_all('div', class_='review-overview__at-a-glance-model-spec-heading')
+                values = at_glance.find_all('div', class_='review-overview__at-a-glance-model-spec-value')
+                
+                for i, heading in enumerate(headings):
+                    heading_text = heading.get_text(strip=True).lower()
+                    if i < len(values):
+                        value_elem = values[i].find('span')
+                        if value_elem:
+                            value_text = value_elem.get_text(strip=True)
+                            
+                            if 'doors' in heading_text:
+                                try:
+                                    specs['doors'] = int(value_text)
+                                except ValueError:
+                                    pass
+                            elif 'seats' in heading_text:
+                                try:
+                                    specs['seats'] = int(value_text)
+                                except ValueError:
+                                    pass
+                            elif 'dimensions' in heading_text:
+                                specs['dimensions_mm'] = value_text
+                            elif 'fuel type' in heading_text and value_text:
+                                grade_info['fuel'] = value_text
+                            elif 'transmission' in heading_text and value_text:
+                                grade_info['transmission'] = value_text
+            
+            return {
+                'grades_engines': [grade_info],
+                'specifications': specs
+            }
+        except Exception as e:
+            print(f"    Error extracting specs from main: {e}")
+            return {'grades_engines': [], 'specifications': {}}
