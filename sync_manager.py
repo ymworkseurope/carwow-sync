@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 完全版（Supabase制約対応）
-Supabase側の制約により重複防止機能を簡素化
+sync_manager.py - 最終修正版
+空のJSONファイルの処理とメソッド名の修正
 """
 import os
 import sys
@@ -77,8 +77,9 @@ def initialize_cache_files():
             except Exception as e:
                 logger.error(f"Failed to initialize {filename}: {e}")
 
+# SupabaseManager クラス
 class SupabaseManager:
-    """Supabaseデータベース管理（制約対応版）"""
+    """Supabaseデータベース管理"""
     
     def __init__(self):
         self.url = SUPABASE_URL
@@ -89,7 +90,7 @@ class SupabaseManager:
             logger.warning("Supabase credentials not configured")
     
     def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT（制約により重複は自動処理）"""
+        """データをUPSERT"""
         if not self.enabled:
             return False
         
@@ -112,20 +113,15 @@ class SupabaseManager:
             
             if response.status_code in [200, 201, 204]:
                 return True
-            elif response.status_code == 409:
-                # 制約違反の場合はUPDATE
+            elif response.status_code == 409 and 'id' in clean_payload:
                 update_url = f"{self.url}/rest/v1/cars?id=eq.{clean_payload['id']}"
-                headers['Prefer'] = 'return=minimal'
                 update_response = requests.patch(
                     update_url,
                     headers=headers,
                     json=clean_payload,
                     timeout=30
                 )
-                success = update_response.status_code in [200, 204]
-                if success:
-                    logger.debug(f"Updated existing record ID {clean_payload['id']}")
-                return success
+                return update_response.status_code in [200, 204]
             else:
                 logger.error(f"Supabase error {response.status_code}: {response.text[:200]}")
                 return False
@@ -214,6 +210,7 @@ class SupabaseManager:
         
         return clean
 
+# GoogleSheetsManager クラス
 class GoogleSheetsManager:
     """Google Sheets管理"""
     
@@ -314,7 +311,7 @@ class GoogleSheetsManager:
         try:
             self._rate_limit_check()
             
-            id_value = str(payload.get('id', ''))
+            id_value = payload.get('id')
             if not id_value:
                 return False
             
@@ -403,8 +400,9 @@ class GoogleSheetsManager:
         
         return row_data
 
+# SyncManager クラス
 class SyncManager:
-    """メイン同期管理クラス（Supabase制約対応版）"""
+    """メイン同期管理クラス"""
     
     def __init__(self):
         # キャッシュファイルを初期化
@@ -428,27 +426,25 @@ class SyncManager:
             'errors': []
         }
     
-    def sync_all(self, makers: Optional[List[str]] = None, limit: Optional[int] = None, full_sync: bool = True):
+    def sync_all(self, makers: Optional[List[str]] = None, limit: Optional[int] = None):
         """全データを同期"""
         logger.info("=" * 60)
         logger.info("Starting Carwow Data Sync")
         logger.info(f"Time: {datetime.now().isoformat()}")
-        logger.info(f"Mode: {'Full Sync' if full_sync else 'Quick Sync'}")
         logger.info(f"Supabase: {'Enabled' if self.supabase.enabled else 'Disabled'}")
         logger.info(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
         logger.info(f"DeepL: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
         logger.info("=" * 60)
         
         if makers is None:
-            try:
+            # get_all_makers メソッドの存在を確認
+            if hasattr(self.scraper, 'get_all_makers'):
                 makers = self.scraper.get_all_makers()
-            except Exception:
+            else:
                 # デフォルトのメーカーリストを使用
                 makers = [
                     'audi', 'bmw', 'mercedes-benz', 'volkswagen', 'toyota',
-                    'honda', 'nissan', 'mazda', 'ford', 'tesla', 'hyundai',
-                    'kia', 'volvo', 'jaguar', 'land-rover', 'porsche',
-                    'lexus', 'infiniti', 'acura', 'genesis'
+                    'honda', 'nissan', 'mazda', 'ford', 'tesla'
                 ]
                 logger.warning("Using default makers list")
             
@@ -472,8 +468,6 @@ class SyncManager:
                     
                     self.stats['total'] += 1
                     self._process_vehicle(model_slug, model_idx + 1, len(models))
-                    
-                    # レート制限対策
                     time.sleep(0.5)
                     
             except Exception as e:
@@ -481,7 +475,6 @@ class SyncManager:
                 self.stats['errors'].append(f"Maker {maker}: {str(e)}")
             
             finally:
-                # メモリクリーンアップ
                 if maker_idx % 10 == 0:
                     import gc
                     gc.collect()
@@ -518,11 +511,6 @@ class SyncManager:
             
             records = self.processor.process_vehicle_data(raw_data)
             
-            if not records:
-                logger.info(f"    NO RECORDS - skipping")
-                self.stats['skipped'] += 1
-                return
-            
             saved_count = 0
             for record in records:
                 supabase_success = self.supabase.upsert(record)
@@ -536,7 +524,7 @@ class SyncManager:
                 logger.info(f"    OK ({saved_count}/{len(records)} records)")
                 self.stats['success'] += 1
             else:
-                logger.info(f"    FAILED - no records saved")
+                logger.info(f"    FAILED")
                 self.stats['failed'] += 1
                 
         except Exception as e:
@@ -564,8 +552,6 @@ class SyncManager:
         if self.stats['total'] > 0:
             success_rate = (self.stats['success'] / self.stats['total']) * 100
             logger.info(f"\nSuccess rate: {success_rate:.1f}%")
-        
-        logger.info("=" * 60)
 
 def main():
     """メインエントリポイント"""
@@ -574,14 +560,12 @@ def main():
     parser.add_argument('--makers', nargs='+', help='Specific makers')
     parser.add_argument('--models', nargs='+', help='Specific models')
     parser.add_argument('--limit', type=int, help='Limit vehicles')
-    parser.add_argument('--full', action='store_true', default=True, help='Full sync mode')
     parser.add_argument('--no-supabase', action='store_true', help='Disable Supabase')
     parser.add_argument('--no-sheets', action='store_true', help='Disable Sheets')
     parser.add_argument('--no-deepl', action='store_true', help='Disable DeepL')
     
     args = parser.parse_args()
     
-    # 環境変数の無効化
     if args.no_supabase:
         os.environ['SUPABASE_URL'] = ''
         os.environ['SUPABASE_KEY'] = ''
@@ -607,11 +591,7 @@ def main():
         if args.models:
             manager.sync_specific(args.models)
         else:
-            manager.sync_all(
-                makers=args.makers, 
-                limit=args.limit, 
-                full_sync=args.full
-            )
+            manager.sync_all(makers=args.makers, limit=args.limit)
     
     except KeyboardInterrupt:
         logger.info("\nInterrupted by user")
