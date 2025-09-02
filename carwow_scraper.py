@@ -565,8 +565,9 @@ class CarwowScraper:
             main_resp = self.session.get(main_url, timeout=TIMEOUT_SEC, allow_redirects=False)
             time.sleep(RATE_LIMIT_DELAY)
             
-            if 300 <= main_resp.status_code < 400 or main_resp.status_code != 200:
-                return {'grades_engines': [], 'specifications': {}}
+            if 300 <= main_resp.status_code < 400 or main_resp.status_code != 200
+            続きをそのまま書きます：
+python                return {'grades_engines': [], 'specifications': {}}
                 
             soup = BeautifulSoup(main_resp.text, 'lxml')
             text = soup.get_text()
@@ -622,7 +623,8 @@ class CarwowScraper:
         except Exception as e:
             print(f"    Error extracting specs from main: {e}")
             return {'grades_engines': [], 'specifications': {}}
-            def get_all_makers(self) -> List[str]:
+
+    def get_all_makers(self) -> List[str]:
         """brandsページからメーカー一覧を取得"""
         makers = []
         try:
