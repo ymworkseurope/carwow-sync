@@ -14,10 +14,10 @@ on:
         description: 'Limit number of vehicles to process'
         required: false
         default: ''
-      test_mode:
-        description: 'Run in test mode (process only 5 vehicles)'
+      full_sync:
+        description: 'Run full sync (all vehicles)'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'true'
@@ -26,8 +26,8 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # タイムアウトを動的に設定（テストモード: 30分、通常: 60分、制限付き）
-    timeout-minutes: ${{ github.event.inputs.test_mode == 'true' && 30 || github.event.inputs.limit && 60 || 120 }}
+    # 本番用タイムアウト設定（最大6時間）
+    timeout-minutes: 360
     
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -68,7 +68,7 @@ jobs:
           translation_cache.json
           exchange_rate_cache.json
           deepl_quota.json
-        key: carwow-cache-${{ runner.os }}-${{ github.run_number }}
+        key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
         restore-keys: |
           carwow-cache-${{ runner.os }}-
     
@@ -77,53 +77,73 @@ jobs:
       run: |
         ARGS=""
         
-        # Test mode
-        if [ "${{ github.event.inputs.test_mode }}" = "true" ]; then
-          ARGS="$ARGS --test"
-        fi
-        
-        # Limit
+        # Limit（指定された場合のみ）
         if [ -n "${{ github.event.inputs.limit }}" ]; then
           ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
         fi
         
-        # Makers
+        # Makers（指定された場合のみ）
         if [ -n "${{ github.event.inputs.makers }}" ]; then
           ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
         fi
         
+        # Full sync mode（デフォルトで有効）
+        if [ "${{ github.event.inputs.full_sync }}" != "false" ]; then
+          ARGS="$ARGS --full"
+        fi
+        
         echo "args=$ARGS" >> $GITHUB_OUTPUT
+        echo "Prepared arguments: $ARGS"
     
     - name: Debug Environment
       run: |
-        echo "=== Debug Information ==="
+        echo "=== Production Sync Configuration ==="
         echo "GitHub Event: ${{ github.event_name }}"
-        echo "Test Mode: ${{ github.event.inputs.test_mode }}"
-        echo "Environment variables set:"
+        echo "Full Sync: ${{ github.event.inputs.full_sync != 'false' && 'ENABLED' || 'DISABLED' }}"
+        echo "Makers: ${{ github.event.inputs.makers || 'ALL' }}"
+        echo "Limit: ${{ github.event.inputs.limit || 'NONE' }}"
+        echo "Timeout: 360 minutes (6 hours)"
+        echo ""
+        echo "Environment variables status:"
         echo "SUPABASE_URL: ${{ env.SUPABASE_URL != '' && 'SET' || 'NOT SET' }}"
         echo "SUPABASE_KEY: ${{ env.SUPABASE_KEY != '' && 'SET' || 'NOT SET' }}"
         echo "GS_CREDS_JSON: ${{ env.GS_CREDS_JSON != '' && 'SET' || 'NOT SET' }}"
         echo "GS_SHEET_ID: ${{ env.GS_SHEET_ID != '' && 'SET' || 'NOT SET' }}"
         echo "DEEPL_KEY: ${{ env.DEEPL_KEY != '' && 'SET' || 'NOT SET' }}"
+        echo "FALLBACK_EXCHANGE_RATE: ${{ env.FALLBACK_EXCHANGE_RATE }}"
     
     - name: Check files
       run: |
+        echo "=== File System Check ==="
         echo "Current directory: $(pwd)"
-        echo "Files in directory:"
-        ls -la
-        echo "Python version:"
-        python --version
-        echo "Python modules:"
-        pip list
+        echo "Python files:"
+        ls -la *.py || echo "No Python files found"
+        echo "Cache files:"
+        ls -la *.json || echo "No JSON files found"
+        echo ""
+        echo "Python version: $(python --version)"
+        echo "Available disk space:"
+        df -h .
+        echo "Memory info:"
+        free -h
     
-    - name: Run sync
+    - name: Run production sync
       run: |
-        echo "Starting sync at $(date)"
+        echo "=== Starting Production Sync at $(date) ==="
+        echo "Arguments: ${{ steps.prepare.outputs.args }}"
+        echo ""
+        
         if [ -f "sync_manager.py" ]; then
-          python sync_manager.py ${{ steps.prepare.outputs.args }} --test 2>&1 | tee sync.log || {
-            echo "=== Script failed with exit code: $? ==="
-            echo "=== Last 50 lines of sync.log ==="
-            tail -50 sync.log
+          # プロダクションモードで実行（--testフラグを削除）
+          python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log || {
+            echo ""
+            echo "=== SYNC FAILED with exit code: $? ==="
+            echo "=== Last 100 lines of sync.log ==="
+            tail -100 sync.log
+            echo ""
+            echo "=== Full log summary ==="
+            wc -l sync.log
+            echo ""
             exit 1
           }
         else
@@ -132,7 +152,40 @@ jobs:
           ls -la
           exit 1
         fi
-        echo "Sync completed at $(date)"
+        
+        echo ""
+        echo "=== Production Sync Completed Successfully at $(date) ==="
+        echo "=== Sync Statistics ==="
+        grep -i "processed\|completed\|total\|error\|success" sync.log | tail -20 || echo "No statistics found"
+    
+    - name: Check sync results
+      if: always()
+      run: |
+        echo "=== Sync Results Analysis ==="
+        if [ -f "sync.log" ]; then
+          echo "Log file size: $(wc -l < sync.log) lines"
+          echo ""
+          echo "=== Error Summary ==="
+          grep -i "error\|failed\|exception" sync.log | tail -10 || echo "No errors found"
+          echo ""
+          echo "=== Success Summary ==="
+          grep -i "success\|completed\|processed" sync.log | tail -10 || echo "No success messages found"
+          echo ""
+          echo "=== Final Status ==="
+          tail -5 sync.log
+        else
+          echo "No sync.log file found"
+        fi
+        
+        echo ""
+        echo "=== Cache File Status ==="
+        for file in body_type_cache.json translation_cache.json exchange_rate_cache.json deepl_quota.json; do
+          if [ -f "$file" ]; then
+            echo "$file: $(wc -c < "$file") bytes"
+          else
+            echo "$file: Not found"
+          fi
+        done
     
     - name: Save cache
       if: always()
@@ -143,24 +196,39 @@ jobs:
           translation_cache.json
           exchange_rate_cache.json
           deepl_quota.json
-        key: carwow-cache-${{ runner.os }}-${{ github.run_number }}
+        key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
     
-    - name: Upload logs and cache
+    - name: Upload comprehensive logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: sync-logs-${{ github.run_number }}
+        name: production-sync-logs-${{ github.run_number }}
         path: |
           sync.log
           body_type_cache.json
           translation_cache.json
           exchange_rate_cache.json
           deepl_quota.json
-        retention-days: 7
+        retention-days: 30
         if-no-files-found: warn
     
-    - name: Send notification on failure
+    - name: Send success notification
+      if: success()
+      run: |
+        echo "=== PRODUCTION SYNC SUCCESS ==="
+        echo "Sync completed successfully at $(date)"
+        echo "Run number: ${{ github.run_number }}"
+        echo "Total runtime: ${{ job.status }}"
+        # ここに成功通知サービス（Slack、Discord等）への通知コードを追加可能
+    
+    - name: Send failure notification
       if: failure()
       run: |
-        echo "Sync failed! Check the logs for details."
-        # ここに通知サービス（Slack、Discord等）への通知コードを追加可能
+        echo "=== PRODUCTION SYNC FAILURE ==="
+        echo "Sync failed at $(date)"
+        echo "Run number: ${{ github.run_number }}"
+        echo "Check the uploaded artifacts for detailed logs"
+        echo ""
+        echo "=== Last 20 lines of log ==="
+        tail -20 sync.log 2>/dev/null || echo "No log file available"
+        # ここに失敗通知サービス（Slack、Discord等）への通知コードを追加可能
