@@ -12,6 +12,21 @@ from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import requests
 
+# 翻訳辞書・ヘルパーの読み込み
+from translation_mappings import (
+    MAKE_JA_MAP,
+    BODY_TYPE_JA_MAP,
+    FUEL_JA_MAP,
+    TRANSMISSION_JA_MAP,
+    DRIVE_TYPE_JA_MAP,
+    COLOR_JA_MAP,
+    DEFAULT_VALUES,
+    translate_body_types,
+    get_transmission_ja,
+    get_drive_type_ja,
+    get_translation,
+)
+
 # ロギング設定
 logging.basicConfig(
     level=logging.INFO,
@@ -152,7 +167,7 @@ class DeepLTranslator:
     
     def translate(self, text: str, target_lang: str = 'JA') -> str:
         """テキストを翻訳"""
-        if not self.enabled or not text or text == 'Information not available':
+        if not self.enabled or not text or text == DEFAULT_VALUES['na_value']:
             return text
         
         # クォータチェック
@@ -202,22 +217,18 @@ class DeepLTranslator:
     
     def translate_colors(self, colors: List[str], existing_map: Dict[str, str]) -> List[str]:
         """色名を翻訳（既存のマッピングを優先）"""
-        if not colors or colors == ['Information not available']:
-            return ['ー']
+        if not colors or colors == [DEFAULT_VALUES['na_value']]:
+            return [DEFAULT_VALUES['dash_value']]
         
         translated = []
         for color in colors:
-            # 既存のマッピングをチェック
             ja_color = color
             for en_word, ja_word in existing_map.items():
                 if en_word.lower() in color.lower():
                     ja_color = color.lower().replace(en_word.lower(), ja_word)
                     break
-            
-            # マッピングで翻訳されなかった場合はDeepL使用
             if ja_color == color and self.enabled:
                 ja_color = self.translate(color)
-            
             translated.append(ja_color)
         
         return translated
@@ -229,8 +240,8 @@ class DataProcessor:
         self.exchange_api = ExchangeRateAPI()
         self.translator = DeepLTranslator()
         self.gbp_to_jpy = self.exchange_api.get_rate()
-        self.na_value = 'Information not available'
-        self.dash_value = 'ー'
+        self.na_value = DEFAULT_VALUES['na_value']
+        self.dash_value = DEFAULT_VALUES['dash_value']
     
     # ------------------------
     # IDユーティリティ
@@ -241,7 +252,6 @@ class DataProcessor:
             return 'NONE'
         
         if isinstance(value, str):
-            # 特殊文字を除去し、空白を統一
             normalized = re.sub(r'[^\w\s]', '', value.lower().strip())
             normalized = re.sub(r'\s+', '_', normalized)
             return normalized if normalized else 'NONE'
@@ -250,22 +260,16 @@ class DataProcessor:
     
     def _generate_consistent_id(self, unique_key: str) -> int:
         """一貫性のある整数IDを生成（修正版）"""
-        # unique_keyをパースして各要素を正規化
         parts = unique_key.split('_')
         if len(parts) >= 3:
             slug = parts[0]
             grade = '_'.join(parts[1:-1]) if len(parts) > 3 else parts[1]
             engine = parts[-1]
-            
-            # 各要素を正規化
             normalized_slug = self._normalize_for_id(slug)
             normalized_grade = self._normalize_for_id(grade)
             normalized_engine = self._normalize_for_id(engine)
-            
-            # より安定したキーを作成
             stable_key = f"{normalized_slug}__{normalized_grade}__{normalized_engine}"
         else:
-            # フォールバック：元のキーをそのまま使用
             stable_key = self._normalize_for_id(unique_key)
         
         hash_obj = hashlib.md5(stable_key.encode('utf-8'))
@@ -286,7 +290,6 @@ class DataProcessor:
         base_data = self._extract_base_data(raw_data)
         
         grades_engines = raw_data.get('grades_engines', [])
-        
         if not grades_engines:
             grades_engines = [{
                 'grade': self.na_value,
@@ -300,7 +303,6 @@ class DataProcessor:
         
         for grade_engine in grades_engines:
             record = base_data.copy()
-            
             record['grade'] = self._normalize_value(grade_engine.get('grade'), self.na_value)
             record['engine'] = self._normalize_value(grade_engine.get('engine'), self.na_value)
             record['fuel'] = self._normalize_value(grade_engine.get('fuel'), self.na_value)
@@ -325,16 +327,14 @@ class DataProcessor:
             # 日本語関連を付与
             record = self._add_japanese_fields(record, raw_data)
 
-            # ===== 新：シンプル版 “末尾テキスト” ロジック =====
-            # 1) fuel をテキストから再判定（engine/modelベース優先）
+            # ===== シンプル版 “末尾テキスト” ロジック =====
             fuel_class = self._classify_fuel(
                 engine_text=record.get('engine', ''),
                 model_ja=record.get('model_ja', ''),
                 explicit_fuel=record.get('fuel', self.na_value)
             )
-            record['fuel_class'] = fuel_class  # デバッグ/確認用に保持（必要なら外してOK）
+            record['fuel_class'] = fuel_class  # 必要なければ後で削除可
 
-            # 2) tail（末尾）を作成
             tail_text = self._build_tail_text(
                 fuel_class=fuel_class,
                 engine_text=record.get('engine', ''),
@@ -342,7 +342,6 @@ class DataProcessor:
                 grade_engine=grade_engine
             )
 
-            # 3) full_model_ja の組み立て（make / model / grade / tail）
             parts = []
             if record['make_ja']:
                 parts.append(record['make_ja'])
@@ -360,10 +359,8 @@ class DataProcessor:
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
             
-            # 修正された整数IDを生成（Supabase用）
             unique_key = f"{record['slug']}_{record['grade']}_{record['engine']}"
             record['id'] = self._generate_consistent_id(unique_key)
-            
             records.append(record)
         
         return records
@@ -373,13 +370,12 @@ class DataProcessor:
     # ------------------------
     def _classify_fuel(self, engine_text: str, model_ja: str, explicit_fuel: str) -> str:
         """
-        BEV/PHEV/HEV/MHEV/Bi-Fuel/Diesel/Petrol のいずれかを返す。
+        BEV/PHEV/HEV/MHEV/Bi-Fuel/Diesel/Petrol を返す。
         engine / model のテキストでまず判定し、explicit_fuel は補助のみ。
         """
         txt = (engine_text or '')
         txt_l = txt.lower()
 
-        # まずMHEV/PHEV/HEV/Bi-Fuelなど特殊系
         if re.search(r'\bmhev\b', txt_l) or 'mild' in txt_l:
             return 'MHEV'
         if re.search(r'plug[-\s]?in', txt_l) or re.search(r'\bphev\b', txt_l):
@@ -389,26 +385,21 @@ class DataProcessor:
         if 'bi-fuel' in txt_l or 'bifuel' in txt_l:
             return 'Bi-Fuel'
 
-        # Electric 判定（排気量が無い/kWhやElectric/Elettricaなど）
         has_disp = bool(re.search(r'\b\d\.\d\s*l\b', txt_l))
         is_ev_keyword = any(k in txt_l for k in ['electric', 'elettrica', 'e-tense']) or ('kwh' in txt_l and not has_disp)
         if is_ev_keyword:
             return 'Electric'
 
-        # Dieselの表記ゆれ
         if any(d in txt_l for d in ['diesel', 'tdi', 'bluehdi', 'cdi']) or re.search(r'\b\d\.\d\s*d\b', txt_l):
             return 'Diesel'
 
-        # Petrol寄りの表記
         if any(p in txt_l for p in ['petrol', 'tsi', 'tfsi', 't-gdi', 'tgi']):
             return 'Petrol'
 
-        # model名のヒント（必要なら拡張）
         model_l = (model_ja or '').lower()
         if any(k in model_l for k in ['electric', 'ev']):
             return 'Electric'
 
-        # explicit fuel を補助として使用（粒度は粗い）
         fuel_map = {
             'electric': 'Electric',
             'petrol': 'Petrol',
@@ -419,7 +410,7 @@ class DataProcessor:
             'bi-fuel': 'Bi-Fuel'
         }
         ef = (explicit_fuel or '').strip().lower()
-        return fuel_map.get(ef, 'Petrol')  # 最後はPetrolにフォールバック
+        return fuel_map.get(ef, 'Petrol')
 
     def _extract_displacement_l(self, engine_text: str) -> Optional[str]:
         """エンジン排気量（x.xL）を抽出して 'x.xL' を返す"""
@@ -432,18 +423,13 @@ class DataProcessor:
 
     def _get_battery_kwh(self, raw_data: Dict, grade_engine: Dict) -> Optional[float]:
         """
-        可能な限り battery kWh を取得。
-        - specifications['battery_capacity_kwh']
-        - engine_text の 'xx.x kWh'
-        - spec_json(additional later) ではなく raw_data のみで完結
+        可能な限り battery kWh を取得（specifications / engine_text から）
         """
-        # 1) specifications から
         specs = (raw_data or {}).get('specifications', {})
         val = specs.get('battery_capacity_kwh')
         if isinstance(val, (int, float)):
             return float(val)
 
-        # 2) engine_text から
         eng = (grade_engine or {}).get('engine') or ''
         m = re.search(r'([\d.]+)\s*kwh', eng.lower())
         if m:
@@ -452,7 +438,6 @@ class DataProcessor:
             except:
                 pass
 
-        # 3) raw specsの文字列に Battery capacity の行がある場合（保険）
         raw_txt = json.dumps(specs, ensure_ascii=False).lower()
         m2 = re.search(r'battery\s*capacity[^0-9]*([\d.]+)\s*kwh', raw_txt)
         if m2:
@@ -496,7 +481,6 @@ class DataProcessor:
                 return f"{disp} {label_map[fuel_class]}"
             return label_map[fuel_class]
 
-        # Petrol / Diesel
         disp = self._extract_displacement_l(engine_text)
         return disp or ''
 
@@ -510,32 +494,24 @@ class DataProcessor:
         return str(value)
     
     def _shorten_engine_text(self, engine_text: str) -> str:
-        """（旧）エンジンテキストの簡易短縮。※新ロジックでは未使用だが互換のため残す"""
+        """（旧）エンジンテキスト簡易短縮（互換用）"""
         if engine_text == self.na_value or not engine_text:
             return ''
-        
-        # ハイブリッドエンジンの処理
         if 'Hybrid' in engine_text or 'e:HEV' in engine_text or 'PHEV' in engine_text:
             match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
             if 'Plug-in' in engine_text or 'PHEV' in engine_text:
                 return f"{match.group(0)} PHEV" if match else 'PHEV'
             else:
                 return f"{match.group(0)} HEV" if match else 'HEV'
-        
-        # 電気自動車の処理
         if 'kWh' in engine_text or 'Electric' in engine_text:
             match = re.search(r'([\d.]+)\s*kWh', engine_text)
             if match:
                 return f"{match.group(1)}kWh"
             else:
                 return 'EV'
-        
-        # 通常のエンジンの処理
         match = re.search(r'(\d+\.?\d*)\s*L', engine_text)
         if match:
             return match.group(0)
-        
-        # その他の場合は最初の単語を返す
         words = engine_text.split()
         return words[0] if words else engine_text
     
@@ -544,10 +520,9 @@ class DataProcessor:
         specs = raw_data.get('specifications', {})
         prices = raw_data.get('prices', {})
         
-        # body_typeの処理
         body_types = raw_data.get('body_types', [])
-        if not body_types or body_types == ['Information not available']:
-            body_types = ['Information not available']
+        if not body_types or body_types == [self.na_value]:
+            body_types = [self.na_value]
         
         base = {
             'slug': raw_data.get('slug', ''),
@@ -566,7 +541,6 @@ class DataProcessor:
             'price_used_gbp': self.na_value if prices.get('price_used_gbp') is None else prices.get('price_used_gbp'),
         }
         
-        # 為替レートを使用して日本円価格を計算
         if base['price_min_gbp'] != self.na_value:
             base['price_min_jpy'] = int(base['price_min_gbp'] * self.gbp_to_jpy)
         else:
@@ -585,194 +559,42 @@ class DataProcessor:
         return base
     
     def _add_japanese_fields(self, record: Dict, raw_data: Dict) -> Dict:
-        """日本語フィールドを追加（DeepL統合版）"""
+        """日本語フィールドを追加（辞書分離版）"""
+        # メーカー名
+        record['make_ja'] = MAKE_JA_MAP.get(record['make_en'], record['make_en'])
         
-        # メーカー名のマッピング
-        make_ja_map = {
-            'Abarth': 'アバルト',
-            'Alfa Romeo': 'アルファロメオ',
-            'Alpine': 'アルピーヌ',
-            'Aston Martin': 'アストンマーティン',
-            'Audi': 'アウディ',
-            'Bentley': 'ベントレー',
-            'BMW': 'BMW',
-            'Bmw': 'BMW',
-            'BYD': 'BYD',
-            'Byd': 'BYD',
-            'Citroen': 'シトロエン',
-            'Cupra': 'クプラ',
-            'Dacia': 'ダチア',
-            'DS': 'DS',
-            'Ds': 'DS',
-            'Ferrari': 'フェラーリ',
-            'Fiat': 'フィアット',
-            'Ford': 'フォード',
-            'Genesis': 'ジェネシス',
-            'Gwm': 'GWM',
-            'Honda': 'ホンダ',
-            'Hyundai': 'ヒュンダイ',
-            'Ineos': 'イネオス',
-            'Infiniti': 'インフィニティ',
-            'Jaecoo': 'ジャエクー',
-            'Jaguar': 'ジャガー',
-            'Jeep': 'ジープ',
-            'Kgm Motors': 'KGMモーターズ',
-            'Kia': 'キア',
-            'Lamborghini': 'ランボルギーニ',
-            'Land Rover': 'ランドローバー',
-            'Lexus': 'レクサス',
-            'Lotus': 'ロータス',
-            'Maserati': 'マセラティ',
-            'Mazda': 'マツダ',
-            'Mclaren': 'マクラーレン',
-            'Mercedes-Benz': 'メルセデス・ベンツ',
-            'MG': 'MG',
-            'Mg': 'MG',
-            'MINI': 'ミニ',
-            'Mini': 'ミニ',
-            'Mitsubishi': '三菱',
-            'Nissan': '日産',
-            'Omoda': 'オモダ',
-            'Peugeot': 'プジョー',
-            'Polestar': 'ポールスター',
-            'Porsche': 'ポルシェ',
-            'Renault': 'ルノー',
-            'Rolls Royce': 'ロールスロイス',
-            'SEAT': 'セアト',
-            'Seat': 'セアト',
-            'Skoda': 'シュコダ',
-            'Smart': 'スマート',
-            'Subaru': 'スバル',
-            'Suzuki': 'スズキ',
-            'Tesla': 'テスラ',
-            'Toyota': 'トヨタ',
-            'Vauxhall': 'ボクスホール',
-            'Volkswagen': 'フォルクスワーゲン',
-            'Volvo': 'ボルボ'
-        }
-        
-        record['make_ja'] = make_ja_map.get(record['make_en'], record['make_en'])
-        
-        # model_jaをDeepLで翻訳
+        # モデル名
         if record['model_en'] and record['model_en'] != self.na_value:
             record['model_ja'] = self.translator.translate(record['model_en'])
         else:
             record['model_ja'] = self.dash_value
         
-        # body_type_jaのマッピング
-        body_type_ja_map = {
-            'SUV': 'SUV',
-            'SUVs': 'SUV',
-            'Hatchback': 'ハッチバック',
-            'Hatchbacks': 'ハッチバック',
-            'Saloon': 'セダン',
-            'Saloons': 'セダン',
-            'Estate': 'ステーションワゴン',
-            'Estate cars': 'ステーションワゴン',
-            'Coupe': 'クーペ',
-            'Coupes': 'クーペ',
-            'Sports Car': 'スポーツカー',
-            'Sports cars': 'スポーツカー',
-            'People Carrier': 'ミニバン',
-            'People carriers': 'ミニバン',
-            'Convertible': 'カブリオレ',
-            'Convertibles': 'カブリオレ',
-            'Electric': '電気自動車',
-            'Information not available': 'ー'
-        }
+        # ボディタイプ
+        record['body_type_ja'] = translate_body_types(record.get('body_type', []))
         
-        body_types = record.get('body_type', [])
-        if not body_types or body_types == ['Information not available']:
-            record['body_type_ja'] = ['ー']
-        else:
-            record['body_type_ja'] = [
-                body_type_ja_map.get(bt, body_type_ja_map.get(bt + 's', bt)) 
-                for bt in body_types
-            ]
+        # 燃料タイプ
+        record['fuel_ja'] = get_translation(FUEL_JA_MAP, record.get('fuel', self.na_value), self.dash_value)
         
-        # 燃料タイプの翻訳（英語→日本語）
-        fuel_ja_map = {
-            'Petrol': 'ガソリン',
-            'Diesel': 'ディーゼル',
-            'Electric': '電気',
-            'Hybrid': 'ハイブリッド',
-            'Plug-in Hybrid': 'プラグインハイブリッド',
-            'MHEV': 'マイルドハイブリッド',
-            'Bi-Fuel': 'バイフューエル',
-            self.na_value: self.dash_value
-        }
-        record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), self.dash_value)
+        # トランスミッション
+        record['transmission_ja'] = get_transmission_ja(record.get('transmission', ''))
         
-        # トランスミッションの翻訳
-        trans_ja_map = {
-            'Automatic': 'オートマチック',
-            'Manual': 'マニュアル',
-            'CVT': 'CVT',
-            'DCT': 'DCT',
-            self.na_value: self.dash_value
-        }
+        # 駆動方式
+        record['drive_type_ja'] = get_drive_type_ja(record.get('drive_type', ''))
         
-        trans = record.get('transmission', '')
-        if trans == self.na_value:
-            record['transmission_ja'] = self.dash_value
-        elif 'Automatic' in trans:
-            record['transmission_ja'] = 'オートマチック'
-        elif 'Manual' in trans:
-            record['transmission_ja'] = 'マニュアル'
-        else:
-            record['transmission_ja'] = trans_ja_map.get(trans, self.dash_value)
-        
-        # ドライブタイプの翻訳
-        drive_ja_map = {
-            'Front-wheel drive': 'FF',
-            'Rear-wheel drive': 'FR',
-            'All-wheel drive': 'AWD',
-            'Four-wheel drive': '4WD',
-            self.na_value: self.dash_value
-        }
-        
-        drive = record.get('drive_type', '')
-        if 'Front' in drive or 'front' in drive:
-            record['drive_type_ja'] = 'FF'
-        elif 'Rear' in drive or 'rear' in drive:
-            record['drive_type_ja'] = 'FR'
-        elif 'All' in drive or 'all' in drive:
-            record['drive_type_ja'] = 'AWD'
-        elif 'Four' in drive or '4' in drive:
-            record['drive_type_ja'] = '4WD'
-        else:
-            record['drive_type_ja'] = drive_ja_map.get(drive, self.dash_value)
-        
-        # カラーの翻訳
-        color_ja_map = {
-            'White': 'ホワイト',
-            'Black': 'ブラック',
-            'Silver': 'シルバー',
-            'Grey': 'グレー',
-            'Gray': 'グレー',
-            'Red': 'レッド',
-            'Blue': 'ブルー',
-            'Green': 'グリーン',
-            'Yellow': 'イエロー',
-            'Orange': 'オレンジ',
-            'Brown': 'ブラウン',
-            'Pearl': 'パール',
-            'Metallic': 'メタリック'
-        }
-        
+        # カラー
         colors = record.get('colors', [])
         if colors == self.na_value or not colors:
             record['colors_ja'] = self.dash_value
         else:
-            record['colors_ja'] = self.translator.translate_colors(colors, color_ja_map)
+            record['colors_ja'] = self.translator.translate_colors(colors, COLOR_JA_MAP)
         
-        # 寸法の日本語フォーマット
+        # 寸法
         if record.get('dimensions_mm') and record['dimensions_mm'] != self.na_value:
             record['dimensions_ja'] = self._format_dimensions_ja(record['dimensions_mm'])
         else:
             record['dimensions_ja'] = self.dash_value
         
-        # overview_jaをDeepLで翻訳
+        # 概要
         overview_en = record.get('overview_en', '')
         if overview_en and overview_en != self.na_value:
             record['overview_ja'] = self.translator.translate(overview_en)
@@ -855,15 +677,11 @@ class DataProcessor:
         if not dimensions_mm or dimensions_mm == self.na_value:
             return self.dash_value
         
-        # カンマ区切りの数字を含む場合に対応
         numbers = re.findall(r'[\d,]+', dimensions_mm)
-        
         if len(numbers) >= 3:
-            # カンマを除去して数値に変換
             length = int(numbers[0].replace(',', ''))
             width = int(numbers[1].replace(',', ''))
             height = int(numbers[2].replace(',', ''))
-            
             return f"全長{length:,} mm x 全幅{width:,} mm x 全高{height:,} mm"
         
         return dimensions_mm
