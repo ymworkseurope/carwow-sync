@@ -8,7 +8,7 @@ import os
 import time
 import hashlib
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import requests
 
@@ -232,6 +232,9 @@ class DataProcessor:
         self.na_value = 'Information not available'
         self.dash_value = 'ー'
     
+    # ------------------------
+    # IDユーティリティ
+    # ------------------------
     def _normalize_for_id(self, value: Any) -> str:
         """ID生成用の値正規化"""
         if value is None or value == '' or value in [self.na_value, self.dash_value, 'N/A', '-']:
@@ -267,7 +270,10 @@ class DataProcessor:
         
         hash_obj = hashlib.md5(stable_key.encode('utf-8'))
         return int(hash_obj.hexdigest()[:8], 16) % 2147483647
-    
+
+    # ------------------------
+    # メイン処理
+    # ------------------------
     def process_vehicle_data(self, raw_data: Optional[Dict]) -> List[Dict]:
         """
         車両データを処理してデータベース用レコードに変換
@@ -316,29 +322,38 @@ class DataProcessor:
                 record['price_min_gbp'] = grade_engine['price_min_gbp']
                 record['price_min_jpy'] = int(grade_engine['price_min_gbp'] * self.gbp_to_jpy)
             
+            # 日本語関連を付与
             record = self._add_japanese_fields(record, raw_data)
-            
-            # full_model_ja の構築（改良版）
+
+            # ===== 新：シンプル版 “末尾テキスト” ロジック =====
+            # 1) fuel をテキストから再判定（engine/modelベース優先）
+            fuel_class = self._classify_fuel(
+                engine_text=record.get('engine', ''),
+                model_ja=record.get('model_ja', ''),
+                explicit_fuel=record.get('fuel', self.na_value)
+            )
+            record['fuel_class'] = fuel_class  # デバッグ/確認用に保持（必要なら外してOK）
+
+            # 2) tail（末尾）を作成
+            tail_text = self._build_tail_text(
+                fuel_class=fuel_class,
+                engine_text=record.get('engine', ''),
+                raw_data=raw_data,
+                grade_engine=grade_engine
+            )
+
+            # 3) full_model_ja の組み立て（make / model / grade / tail）
             parts = []
-            
-            # make_ja と model_ja は必須
             if record['make_ja']:
                 parts.append(record['make_ja'])
-            if record['model_ja'] and record['model_ja'] != self.dash_value:
+            if record.get('model_ja') and record['model_ja'] != self.dash_value:
                 parts.append(record['model_ja'])
-            
-            # grade を追加（有効な値の場合のみ）
             if record['grade'] and record['grade'] not in [self.na_value, self.dash_value, '']:
                 parts.append(record['grade'])
-            
-            # engine を短縮して追加（有効な値の場合のみ）
-            if record['engine'] and record['engine'] not in [self.na_value, self.dash_value, '']:
-                engine_short = self._shorten_engine_text(record['engine'])
-                if engine_short and engine_short != self.dash_value:
-                    parts.append(engine_short)
-            
-            # 半角スペースで結合
-            record['full_model_ja'] = ' '.join(parts)
+            if tail_text:
+                parts.append(tail_text)
+            record['full_model_ja'] = ' '.join(parts).strip()
+            # ===== ここまで =====
             
             # spec_jsonを生成
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
@@ -352,7 +367,142 @@ class DataProcessor:
             records.append(record)
         
         return records
-    
+
+    # ------------------------
+    # 末尾テキスト・判定ユーティリティ
+    # ------------------------
+    def _classify_fuel(self, engine_text: str, model_ja: str, explicit_fuel: str) -> str:
+        """
+        BEV/PHEV/HEV/MHEV/Bi-Fuel/Diesel/Petrol のいずれかを返す。
+        engine / model のテキストでまず判定し、explicit_fuel は補助のみ。
+        """
+        txt = (engine_text or '')
+        txt_l = txt.lower()
+
+        # まずMHEV/PHEV/HEV/Bi-Fuelなど特殊系
+        if re.search(r'\bmhev\b', txt_l) or 'mild' in txt_l:
+            return 'MHEV'
+        if re.search(r'plug[-\s]?in', txt_l) or re.search(r'\bphev\b', txt_l):
+            return 'PHEV'
+        if 'hybrid' in txt_l or 'e:hev' in txt_l:
+            return 'HEV'
+        if 'bi-fuel' in txt_l or 'bifuel' in txt_l:
+            return 'Bi-Fuel'
+
+        # Electric 判定（排気量が無い/kWhやElectric/Elettricaなど）
+        has_disp = bool(re.search(r'\b\d\.\d\s*l\b', txt_l))
+        is_ev_keyword = any(k in txt_l for k in ['electric', 'elettrica', 'e-tense']) or ('kwh' in txt_l and not has_disp)
+        if is_ev_keyword:
+            return 'Electric'
+
+        # Dieselの表記ゆれ
+        if any(d in txt_l for d in ['diesel', 'tdi', 'bluehdi', 'cdi']) or re.search(r'\b\d\.\d\s*d\b', txt_l):
+            return 'Diesel'
+
+        # Petrol寄りの表記
+        if any(p in txt_l for p in ['petrol', 'tsi', 'tfsi', 't-gdi', 'tgi']):
+            return 'Petrol'
+
+        # model名のヒント（必要なら拡張）
+        model_l = (model_ja or '').lower()
+        if any(k in model_l for k in ['electric', 'ev']):
+            return 'Electric'
+
+        # explicit fuel を補助として使用（粒度は粗い）
+        fuel_map = {
+            'electric': 'Electric',
+            'petrol': 'Petrol',
+            'diesel': 'Diesel',
+            'hybrid': 'HEV',
+            'plug-in hybrid': 'PHEV',
+            'mhev': 'MHEV',
+            'bi-fuel': 'Bi-Fuel'
+        }
+        ef = (explicit_fuel or '').strip().lower()
+        return fuel_map.get(ef, 'Petrol')  # 最後はPetrolにフォールバック
+
+    def _extract_displacement_l(self, engine_text: str) -> Optional[str]:
+        """エンジン排気量（x.xL）を抽出して 'x.xL' を返す"""
+        if not engine_text or engine_text == self.na_value:
+            return None
+        m = re.search(r'(\d+(?:\.\d+)?)\s*l\b', engine_text.lower())
+        if m:
+            return f"{m.group(1)}L"
+        return None
+
+    def _get_battery_kwh(self, raw_data: Dict, grade_engine: Dict) -> Optional[float]:
+        """
+        可能な限り battery kWh を取得。
+        - specifications['battery_capacity_kwh']
+        - engine_text の 'xx.x kWh'
+        - spec_json(additional later) ではなく raw_data のみで完結
+        """
+        # 1) specifications から
+        specs = (raw_data or {}).get('specifications', {})
+        val = specs.get('battery_capacity_kwh')
+        if isinstance(val, (int, float)):
+            return float(val)
+
+        # 2) engine_text から
+        eng = (grade_engine or {}).get('engine') or ''
+        m = re.search(r'([\d.]+)\s*kwh', eng.lower())
+        if m:
+            try:
+                return float(m.group(1))
+            except:
+                pass
+
+        # 3) raw specsの文字列に Battery capacity の行がある場合（保険）
+        raw_txt = json.dumps(specs, ensure_ascii=False).lower()
+        m2 = re.search(r'battery\s*capacity[^0-9]*([\d.]+)\s*kwh', raw_txt)
+        if m2:
+            try:
+                return float(m2.group(1))
+            except:
+                pass
+
+        return None
+
+    def _format_kwh_tail(self, kwh: float) -> str:
+        """xx.xkWh（.0は落とす）"""
+        if kwh is None:
+            return ''
+        s = f"{kwh:.1f}"
+        if s.endswith('.0'):
+            s = s[:-2]
+        return f"{s}kWh"
+
+    def _build_tail_text(self, fuel_class: str, engine_text: str, raw_data: Dict, grade_engine: Dict) -> str:
+        """
+        末尾テキストを構築
+        - Electric: kWhがあれば 'xx.xkWh'、なければ 'EV'
+        - PHEV/HEV/MHEV/Bi-Fuel: 'x.xL {LABEL}'（排気量なければ {LABEL}のみ）
+        - Petrol/Diesel: 'x.xL'（排気量なければ空）
+        """
+        label_map = {
+            'PHEV': 'PHEV',
+            'HEV': 'HEV',
+            'MHEV': 'MHEV',
+            'Bi-Fuel': 'Bi-Fuel'
+        }
+
+        if fuel_class == 'Electric':
+            kwh = self._get_battery_kwh(raw_data, grade_engine)
+            return self._format_kwh_tail(kwh) if kwh is not None else 'EV'
+
+        if fuel_class in ('PHEV', 'HEV', 'MHEV', 'Bi-Fuel'):
+            disp = self._extract_displacement_l(engine_text)
+            if disp:
+                return f"{disp} {label_map[fuel_class]}"
+            return label_map[fuel_class]
+
+        # Petrol / Diesel
+        disp = self._extract_displacement_l(engine_text)
+        return disp or ''
+
+    # ------------------------
+    # 既存の補助関数
+    # ------------------------
     def _normalize_value(self, value: Any, default: str) -> str:
         """値を正規化"""
         if value is None or value == '' or value == 'N/A' or value == '-':
@@ -360,7 +510,7 @@ class DataProcessor:
         return str(value)
     
     def _shorten_engine_text(self, engine_text: str) -> str:
-        """エンジンテキストを短縮（ハイブリッド/EV情報を保持）"""
+        """（旧）エンジンテキストの簡易短縮。※新ロジックでは未使用だが互換のため残す"""
         if engine_text == self.na_value or not engine_text:
             return ''
         
@@ -540,13 +690,15 @@ class DataProcessor:
                 for bt in body_types
             ]
         
-        # 燃料タイプの翻訳
+        # 燃料タイプの翻訳（英語→日本語）
         fuel_ja_map = {
             'Petrol': 'ガソリン',
             'Diesel': 'ディーゼル',
             'Electric': '電気',
             'Hybrid': 'ハイブリッド',
             'Plug-in Hybrid': 'プラグインハイブリッド',
+            'MHEV': 'マイルドハイブリッド',
+            'Bi-Fuel': 'バイフューエル',
             self.na_value: self.dash_value
         }
         record['fuel_ja'] = fuel_ja_map.get(record.get('fuel', self.na_value), self.dash_value)
@@ -693,7 +845,7 @@ class DataProcessor:
             details['type'] = 'Petrol'
         elif 'diesel' in engine_text.lower():
             details['type'] = 'Diesel'
-        elif 'hybrid' in engine_text.lower():
+        elif 'hybrid' in engine_text.lower() or 'mhev' in engine_text.lower():
             details['type'] = 'Hybrid'
         
         return details
