@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-carwow_scraper.py - 本番用完全版（構文エラー修正版）
+carwow_scraper.py
 """
 import re
 import json
