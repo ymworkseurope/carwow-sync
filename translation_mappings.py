@@ -2046,7 +2046,6 @@ COLOR_JA_MAP = {
     'Tone on Tone - Blu Tawaret/Blu Nethuns Shiny': 'トーンオントーン - ブルータワレト／ブルーネーテンスシャイニー',
     'Tone on Tone - Blu Airone/Blu Mehit Matt': 'トーンオントーン - ブルーアイローネ／ブルーメヒトマット',
     'Tone on Tone - Arancio Bruciato/Arancio Bruciato Scuro Matt': 'トーンオントーン - アランチョブルチャート／アランチョブルチャートスクーロマット',
-t': 'アド・ペルソナムマット - ロッソミミル',
     'Ad Personam matt - Rossa epona': 'アド・ペルソナムマット - ロッサエポナ',
     'Ad Personam matt - Nero Pulso': 'アド・ペルソナムマット - ネロプルソ',
     'Ad Personam matt - Grigio adamas': 'アド・ペルソナムマット - グリジオアダマス',
