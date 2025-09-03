@@ -333,7 +333,6 @@ class DataProcessor:
                 model_ja=record.get('model_ja', ''),
                 explicit_fuel=record.get('fuel', self.na_value)
             )
-            record['fuel_class'] = fuel_class  # 必要なければ後で削除可
 
             tail_text = self._build_tail_text(
                 fuel_class=fuel_class,
@@ -356,6 +355,9 @@ class DataProcessor:
             
             # spec_jsonを生成
             record['spec_json'] = self._create_spec_json(raw_data, grade_engine)
+            # 保存スキーマは触らず、補助情報として spec_json にだけ fuel_class を残す
+            record['spec_json']['fuel_class'] = fuel_class
+
             record['updated_at'] = datetime.now().isoformat()
             record['is_active'] = raw_data.get('is_active', True)
             
