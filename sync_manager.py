@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-sync_manager.py - 最終修正版
-空のJSONファイルの処理とメソッド名の修正
+sync_manager.py
 """
 import os
 import sys
