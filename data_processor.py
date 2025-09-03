@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-data_processor.py - 本番用完全版
-整数ID使用、full_model_ja改良、DeepL翻訳統合、ID生成ロジック修正版
+data_processor.py
 """
 import re
 import json
