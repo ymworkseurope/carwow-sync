@@ -461,21 +461,26 @@ class CarwowScraper:
                     bhp_match = re.search(r'(\d+)\s*bhp', item_text, re.IGNORECASE)
                     if bhp_match:
                         grade_info['power_bhp'] = int(bhp_match.group(1))
+        # --- Fuel判定の強化 ---
         if engine_text and engine_text != 'Information not available':
             engine_lower = engine_text.lower()
-            if 'kwh' in engine_lower or 'electric' in engine_lower:
+            if 'mhev' in engine_lower or 'mild' in engine_lower:
+                grade_info['fuel'] = 'MHEV'
+            elif 'plug-in' in engine_lower or 'phev' in engine_lower:
+                grade_info['fuel'] = 'Plug-in Hybrid'
+            elif 'hybrid' in engine_lower or 'e:hev' in engine_lower:
+                grade_info['fuel'] = 'Hybrid'
+            elif 'kwh' in engine_lower or 'electric' in engine_lower or 'elettrica' in engine_lower or 'e-tense' in engine_lower:
                 grade_info['fuel'] = 'Electric'
                 if grade_info['transmission'] == 'Information not available':
                     grade_info['transmission'] = 'Automatic'
-            elif 'diesel' in engine_lower:
+            elif any(d in engine_lower for d in ['tdi', 'bluehdi', 'cdi']) or re.search(r'\b\d\.\d\s*d\b', engine_lower):
                 grade_info['fuel'] = 'Diesel'
-            elif 'hybrid' in engine_lower:
-                if 'plug-in' in engine_lower:
-                    grade_info['fuel'] = 'Plug-in Hybrid'
-                else:
-                    grade_info['fuel'] = 'Hybrid'
-            elif 'petrol' in engine_lower or 'tsi' in engine_lower or 'tfsi' in engine_lower:
+            elif any(p in engine_lower for p in ['petrol', 'tsi', 'tfsi', 't-gdi', 'tgi']):
                 grade_info['fuel'] = 'Petrol'
+            elif 'bi-fuel' in engine_lower or 'bifuel' in engine_lower:
+                grade_info['fuel'] = 'Bi-Fuel'
+        # セクション内のリストからの補完（既存ロジック）
         for category_list in category_lists:
             list_items = category_list.find_all('li', class_='specification-breakdown__category-list-item')
             for item in list_items:
@@ -486,6 +491,8 @@ class CarwowScraper:
                     grade_info['fuel'] = 'Diesel'
                 elif 'electric' in item_text and grade_info['fuel'] == 'Information not available':
                     grade_info['fuel'] = 'Electric'
+                elif 'bi-fuel' in item_text and grade_info['fuel'] == 'Information not available':
+                    grade_info['fuel'] = 'Bi-Fuel'
         return grade_info
 
     def _extract_basic_specs(self, soup: BeautifulSoup) -> Dict:
