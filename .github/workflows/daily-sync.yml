@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     # 本番用タイムアウト設定（最大6時間）
     timeout-minutes: 360
-    
+
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -36,22 +36,22 @@ jobs:
       GS_SHEET_ID: ${{ secrets.GS_SHEET_ID }}
       DEEPL_KEY: ${{ secrets.DEEPL_KEY }}
       FALLBACK_EXCHANGE_RATE: ${{ secrets.FALLBACK_EXCHANGE_RATE || '185.0' }}
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    
+
     - name: Create cache files
       run: |
         touch body_type_cache.json
@@ -59,7 +59,7 @@ jobs:
         touch exchange_rate_cache.json
         touch deepl_quota.json
         touch sync.log
-    
+
     - name: Restore cache
       uses: actions/cache@v3
       with:
@@ -71,30 +71,30 @@ jobs:
         key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
         restore-keys: |
           carwow-cache-${{ runner.os }}-
-    
+
     - name: Prepare arguments
       id: prepare
       run: |
         ARGS=""
-        
+
         # Limit（指定された場合のみ）
         if [ -n "${{ github.event.inputs.limit }}" ]; then
           ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
         fi
-        
+
         # Makers（指定された場合のみ）
         if [ -n "${{ github.event.inputs.makers }}" ]; then
           ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
         fi
-        
+
         # Full sync mode（デフォルトで有効）
         if [ "${{ github.event.inputs.full_sync }}" != "false" ]; then
           ARGS="$ARGS --full"
         fi
-        
+
         echo "args=$ARGS" >> $GITHUB_OUTPUT
         echo "Prepared arguments: $ARGS"
-    
+
     - name: Debug Environment
       run: |
         echo "=== Production Sync Configuration ==="
@@ -111,7 +111,7 @@ jobs:
         echo "GS_SHEET_ID: ${{ env.GS_SHEET_ID != '' && 'SET' || 'NOT SET' }}"
         echo "DEEPL_KEY: ${{ env.DEEPL_KEY != '' && 'SET' || 'NOT SET' }}"
         echo "FALLBACK_EXCHANGE_RATE: ${{ env.FALLBACK_EXCHANGE_RATE }}"
-    
+
     - name: Check files
       run: |
         echo "=== File System Check ==="
@@ -126,13 +126,13 @@ jobs:
         df -h .
         echo "Memory info:"
         free -h
-    
+
     - name: Run production sync
       run: |
         echo "=== Starting Production Sync at $(date) ==="
         echo "Arguments: ${{ steps.prepare.outputs.args }}"
         echo ""
-        
+
         if [ -f "sync_manager.py" ]; then
           # プロダクションモードで実行（--testフラグを削除）
           python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log || {
@@ -152,12 +152,12 @@ jobs:
           ls -la
           exit 1
         fi
-        
+
         echo ""
         echo "=== Production Sync Completed Successfully at $(date) ==="
         echo "=== Sync Statistics ==="
         grep -i "processed\|completed\|total\|error\|success" sync.log | tail -20 || echo "No statistics found"
-    
+
     - name: Check sync results
       if: always()
       run: |
@@ -176,7 +176,7 @@ jobs:
         else
           echo "No sync.log file found"
         fi
-        
+
         echo ""
         echo "=== Cache File Status ==="
         for file in body_type_cache.json translation_cache.json exchange_rate_cache.json deepl_quota.json; do
@@ -186,7 +186,7 @@ jobs:
             echo "$file: Not found"
           fi
         done
-    
+
     - name: Save cache
       if: always()
       uses: actions/cache@v3
@@ -197,7 +197,7 @@ jobs:
           exchange_rate_cache.json
           deepl_quota.json
         key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
-    
+
     - name: Upload comprehensive logs
       if: always()
       uses: actions/upload-artifact@v4
@@ -211,7 +211,7 @@ jobs:
           deepl_quota.json
         retention-days: 30
         if-no-files-found: warn
-    
+
     - name: Send success notification
       if: success()
       run: |
@@ -220,7 +220,7 @@ jobs:
         echo "Run number: ${{ github.run_number }}"
         echo "Total runtime: ${{ job.status }}"
         # ここに成功通知サービス（Slack、Discord等）への通知コードを追加可能
-    
+
     - name: Send failure notification
       if: failure()
       run: |
@@ -232,3 +232,24 @@ jobs:
         echo "=== Last 20 lines of log ==="
         tail -20 sync.log 2>/dev/null || echo "No log file available"
         # ここに失敗通知サービス（Slack、Discord等）への通知コードを追加可能
+
+    - name: Heartbeat (prevent Supabase pause)
+      if: always()
+      env:
+        HB_ID: '1'
+        HB_SOURCE: 'carwow_sync'
+      run: |
+        echo "=== Heartbeat Upsert ==="
+        ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        PAYLOAD='[{"id":'"$HB_ID"',"source":"'"$HB_SOURCE"'","last_run":"'"$ISO_NOW"'","ok":true}]'
+
+        # PostgRESTのUPSERT：?on_conflict=id + Prefer: resolution=merge-duplicates
+        # return=minimalでレスポンスを省略してログを汚さない
+        curl -fSs -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
+          -H "apikey: $SUPABASE_KEY" \
+          -H "Authorization: Bearer $SUPABASE_KEY" \
+          -H "Content-Type: application/json" \
+          -H "Prefer: resolution=merge-duplicates,return=minimal" \
+          -d "$PAYLOAD" \
+          && echo "Heartbeat OK at $ISO_NOW" \
+          || { echo "Heartbeat failed (non-blocking)"; true; }
