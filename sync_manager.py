@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync_manager.py
+sync_manager.py  — Sheets重複防止版（IDキャッシュ & 文字列比較対応）
 """
 import os
 import sys
@@ -65,7 +65,6 @@ def initialize_cache_files():
         'exchange_rate_cache.json': {},
         'deepl_quota.json': {'month': datetime.now().strftime('%Y-%m'), 'used': 0}
     }
-    
     for filename, default_content in cache_files.items():
         file_path = Path(filename)
         if not file_path.exists() or file_path.stat().st_size == 0:
@@ -79,20 +78,17 @@ def initialize_cache_files():
 # SupabaseManager クラス
 class SupabaseManager:
     """Supabaseデータベース管理"""
-    
     def __init__(self):
         self.url = SUPABASE_URL
         self.key = SUPABASE_KEY
         self.enabled = bool(self.url and self.key)
-        
         if not self.enabled:
             logger.warning("Supabase credentials not configured")
-    
+
     def upsert(self, payload: Dict) -> bool:
         """データをUPSERT"""
         if not self.enabled:
             return False
-        
         try:
             headers = {
                 'apikey': self.key,
@@ -100,16 +96,13 @@ class SupabaseManager:
                 'Content-Type': 'application/json',
                 'Prefer': 'resolution=merge-duplicates,return=minimal'
             }
-            
             clean_payload = self._prepare_payload(payload)
-            
             response = requests.post(
                 f"{self.url}/rest/v1/cars",
                 headers=headers,
                 json=clean_payload,
                 timeout=30
             )
-            
             if response.status_code in [200, 201, 204]:
                 return True
             elif response.status_code == 409 and 'id' in clean_payload:
@@ -124,16 +117,14 @@ class SupabaseManager:
             else:
                 logger.error(f"Supabase error {response.status_code}: {response.text[:200]}")
                 return False
-                
         except Exception as e:
             logger.error(f"Supabase upsert error: {e}")
             return False
-    
+
     def mark_inactive(self, slug: str, grade: str = None, engine: str = None) -> bool:
         """レコードを非アクティブに設定"""
         if not self.enabled:
             return False
-        
         try:
             headers = {
                 'apikey': self.key,
@@ -141,39 +132,32 @@ class SupabaseManager:
                 'Content-Type': 'application/json',
                 'Prefer': 'return=minimal'
             }
-            
             update_url = f"{self.url}/rest/v1/cars?slug=eq.{slug}"
             if grade:
                 update_url += f"&grade=eq.{grade}"
             if engine:
                 update_url += f"&engine=eq.{engine}"
-            
             update_data = {
                 'is_active': False,
                 'updated_at': datetime.now().isoformat()
             }
-            
             response = requests.patch(
                 update_url,
                 headers=headers,
                 json=update_data,
                 timeout=30
             )
-            
             return response.status_code in [200, 204]
-                
         except Exception as e:
             logger.error(f"Error marking inactive: {e}")
             return False
-    
+
     def _prepare_payload(self, payload: Dict) -> Dict:
         """ペイロードを準備"""
         clean = {}
-        
         for key, value in payload.items():
             if value is None or value in ['-', 'N/A', 'ー']:
                 continue
-            
             if key in ['body_type', 'body_type_ja', 'colors', 'colors_ja', 'media_urls']:
                 if isinstance(value, list):
                     if value == ['Information not available'] or value == ['ー']:
@@ -183,13 +167,10 @@ class SupabaseManager:
                 else:
                     clean[key] = []
             elif key == 'spec_json':
-                if isinstance(value, dict):
-                    clean[key] = value
-                else:
-                    clean[key] = {}
+                clean[key] = value if isinstance(value, dict) else {}
             elif key in ['price_min_gbp', 'price_max_gbp', 'price_used_gbp',
-                        'price_min_jpy', 'price_max_jpy', 'price_used_jpy',
-                        'engine_price_gbp', 'engine_price_jpy']:
+                         'price_min_jpy', 'price_max_jpy', 'price_used_jpy',
+                         'engine_price_gbp', 'engine_price_jpy']:
                 if value not in ['Information not available', 'ー'] and value is not None:
                     try:
                         clean[key] = float(value)
@@ -206,13 +187,11 @@ class SupabaseManager:
             else:
                 if value not in ['Information not available', 'ー']:
                     clean[key] = value
-        
         return clean
 
-# GoogleSheetsManager クラス
+# GoogleSheetsManager クラス（重複防止対応）
 class GoogleSheetsManager:
-    """Google Sheets管理"""
-    
+    """Google Sheets管理（IDを文字列化・A列キャッシュで重複防止）"""
     def __init__(self):
         self.worksheet = None
         self.enabled = False
@@ -220,16 +199,17 @@ class GoogleSheetsManager:
         self.last_request_time = 0
         self.request_count = 0
         self.rate_limit_per_100_seconds = 95
+        # ID→行番号のキャッシュ（1-based）。ヘッダー行は1。
+        self._id_row_cache: Optional[Dict[str, int]] = None
+        self._next_append_row: Optional[int] = None
         self._initialize()
-    
+
     def _rate_limit_check(self):
-        """レート制限チェック"""
+        """レート制限チェック（100秒95リクエスト近似）"""
         current_time = time.time()
-        
         if current_time - self.last_request_time > 100:
             self.request_count = 0
             self.last_request_time = current_time
-        
         if self.request_count >= self.rate_limit_per_100_seconds:
             sleep_time = 100 - (current_time - self.last_request_time)
             if sleep_time > 0:
@@ -237,39 +217,31 @@ class GoogleSheetsManager:
                 time.sleep(sleep_time)
                 self.request_count = 0
                 self.last_request_time = time.time()
-        
         self.request_count += 1
-    
+
     def _initialize(self):
         """初期化"""
         if not (GS_CREDS_JSON and GS_SHEET_ID):
             logger.warning("Google Sheets credentials not configured")
             return
-        
         creds_path = Path("temp_creds.json")
-        
         try:
             if GS_CREDS_JSON.startswith('{'):
                 creds_data = json.loads(GS_CREDS_JSON)
             else:
                 with open(GS_CREDS_JSON, 'r') as f:
                     creds_data = json.load(f)
-            
             creds_path.write_text(json.dumps(creds_data))
-            
             scopes = [
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive"
             ]
-            
             credentials = Credentials.from_service_account_file(
-                str(creds_path), 
+                str(creds_path),
                 scopes=scopes
             )
-            
             client = gspread.authorize(credentials)
             spreadsheet = client.open_by_key(GS_SHEET_ID)
-            
             try:
                 self.worksheet = spreadsheet.worksheet(SHEET_NAME)
             except gspread.WorksheetNotFound:
@@ -278,19 +250,17 @@ class GoogleSheetsManager:
                     rows=10000,
                     cols=len(SHEET_HEADERS)
                 )
-            
             self._setup_headers()
+            self._build_id_cache()  # ← ここでA列キャッシュを作る
             self.enabled = True
             logger.info(f"Connected to Google Sheets: {SHEET_NAME}")
-            
         except Exception as e:
             logger.error(f"Google Sheets initialization error: {e}")
             self.enabled = False
-        
         finally:
             if creds_path.exists():
                 creds_path.unlink()
-    
+
     def _setup_headers(self):
         """ヘッダー設定"""
         try:
@@ -301,86 +271,123 @@ class GoogleSheetsManager:
                 self.worksheet.update([self.headers], "A1")
         except Exception as e:
             logger.error(f"Error setting headers: {e}")
-    
-    def upsert(self, payload: Dict) -> bool:
-        """データをUPSERT"""
-        if not self.enabled:
-            return False
-        
+
+    def _build_id_cache(self):
+        """A列のID→行番号キャッシュを構築"""
         try:
             self._rate_limit_check()
-            
+            ids = self.worksheet.col_values(1)  # 1列目（A列）, 1行目はヘッダ
+            # ids[0] は "id" ヘッダ想定
+            cache: Dict[str, int] = {}
+            for idx, val in enumerate(ids[1:], start=2):
+                if val is not None and str(val).strip() != "":
+                    cache[str(val).strip()] = idx
+            self._id_row_cache = cache
+            # 次に追記する行番号（A列の実データ+1行）
+            self._next_append_row = (max(cache.values()) + 1) if cache else 2
+        except Exception as e:
+            logger.error(f"Error building ID cache: {e}")
+            # フォールバック
+            self._id_row_cache = {}
+            self._next_append_row = 2
+
+    def upsert(self, payload: Dict) -> bool:
+        """データをUPSERT（A列IDで行を特定して更新。なければ末尾に追記）"""
+        if not self.enabled:
+            return False
+        try:
+            if self._id_row_cache is None:
+                self._build_id_cache()
+
+            # すべて文字列で比較する（型ブレ回避）
             id_value = payload.get('id')
-            if not id_value:
+            if id_value is None:
                 return False
-            
-            try:
-                all_values = self.worksheet.get_all_values()
-                row_num = None
-                
-                for i, row in enumerate(all_values[1:], start=2):
-                    if len(row) > 0 and row[0] == id_value:
-                        row_num = i
-                        break
-                
-                if not row_num:
-                    row_num = len(all_values) + 1
-                    
-            except Exception:
-                row_num = self.worksheet.row_count + 1
-            
+            id_value_str = str(id_value)
+
+            # 既存行の判定：キャッシュ参照
+            row_num = self._id_row_cache.get(id_value_str)
+            if row_num is None:
+                # 新規行 → 追記行番号を割り当て
+                row_num = self._next_append_row or 2
+                self._next_append_row = row_num + 1
+                # 追記後のキャッシュ更新も忘れずに
+                self._id_row_cache[id_value_str] = row_num
+
             row_data = self._prepare_row_data(payload)
-            
+
             self._rate_limit_check()
             self.worksheet.update(
-                [row_data], 
+                [row_data],
                 f"A{row_num}",
                 value_input_option='RAW'
             )
-            
             return True
-            
         except Exception as e:
             logger.error(f"Sheets upsert error: {e}")
             return False
-    
+
     def mark_inactive(self, slug: str, grade: str = None, engine: str = None) -> bool:
-        """レコードを非アクティブに設定"""
+        """レコードを非アクティブに設定（型ブレ回避のため文字列比較）"""
         if not self.enabled:
             return False
-        
         try:
             self._rate_limit_check()
             all_values = self.worksheet.get_all_values()
-            
+            # ヘッダーの位置を確定
+            try:
+                is_active_index = self.headers.index('is_active')
+                updated_at_index = self.headers.index('updated_at')
+                slug_index = self.headers.index('slug')
+                grade_index = self.headers.index('grade')
+                engine_index = self.headers.index('engine')
+            except ValueError:
+                logger.error("Header indices not found; cannot mark inactive.")
+                return False
+
+            slug_s = str(slug) if slug is not None else ""
+            grade_s = str(grade) if grade is not None else None
+            engine_s = str(engine) if engine is not None else None
+
+            target_row = None
             for i, row in enumerate(all_values[1:], start=2):
-                if len(row) > 7:
-                    if (row[1] == slug and 
-                        (not grade or row[6] == grade) and 
-                        (not engine or row[7] == engine)):
-                        
-                        is_active_index = self.headers.index('is_active')
-                        updated_at_index = self.headers.index('updated_at')
-                        
-                        self._rate_limit_check()
-                        self.worksheet.update_cell(i, is_active_index + 1, 'FALSE')
-                        self.worksheet.update_cell(i, updated_at_index + 1, datetime.now().isoformat())
-                        
-                        return True
-            
-            return False
-            
+                r_slug = row[slug_index] if len(row) > slug_index else ""
+                if r_slug != slug_s:
+                    continue
+                if grade_s is not None:
+                    r_grade = row[grade_index] if len(row) > grade_index else ""
+                    if r_grade != grade_s:
+                        continue
+                if engine_s is not None:
+                    r_engine = row[engine_index] if len(row) > engine_index else ""
+                    if r_engine != engine_s:
+                        continue
+                target_row = i
+                break
+
+            if target_row is None:
+                return False
+
+            # is_activeとupdated_atだけ個別更新
+            self._rate_limit_check()
+            self.worksheet.update_cell(target_row, is_active_index + 1, 'FALSE')
+            self._rate_limit_check()
+            self.worksheet.update_cell(target_row, updated_at_index + 1, datetime.now().isoformat())
+            return True
         except Exception as e:
             logger.error(f"Error marking inactive in Sheets: {e}")
             return False
-    
+
     def _prepare_row_data(self, payload: Dict) -> List[str]:
-        """行データを準備"""
+        """行データを準備（IDは文字列化。配列/辞書はJSON/カンマ連結）"""
         row_data = []
-        
         for header in self.headers:
             value = payload.get(header)
-            
+            if header == "id":
+                # A列は必ず文字列化して保存（比較も文字列で行うため）
+                row_data.append("" if value in [None, '', 'N/A', '-', 'Information not available', 'ー'] else str(value))
+                continue
+
             if value is None or value in ['-', 'N/A', 'Information not available', 'ー']:
                 row_data.append('')
             elif isinstance(value, list):
@@ -396,25 +403,20 @@ class GoogleSheetsManager:
                 row_data.append('TRUE' if value else 'FALSE')
             else:
                 row_data.append(str(value))
-        
         return row_data
 
 # SyncManager クラス
 class SyncManager:
     """メイン同期管理クラス"""
-    
     def __init__(self):
         # キャッシュファイルを初期化
         initialize_cache_files()
-        
         self.scraper = CarwowScraper()
         self.processor = DataProcessor()
         self.supabase = SupabaseManager()
         self.sheets = GoogleSheetsManager()
-        
         if not os.getenv('DEEPL_KEY'):
             logger.warning("DeepL API key not configured")
-        
         self.stats = {
             'total': 0,
             'success': 0,
@@ -424,7 +426,7 @@ class SyncManager:
             'records_saved': 0,
             'errors': []
         }
-    
+
     def sync_all(self, makers: Optional[List[str]] = None, limit: Optional[int] = None):
         """全データを同期"""
         logger.info("=" * 60)
@@ -434,72 +436,59 @@ class SyncManager:
         logger.info(f"Google Sheets: {'Enabled' if self.sheets.enabled else 'Disabled'}")
         logger.info(f"DeepL: {'Enabled' if os.getenv('DEEPL_KEY') else 'Disabled'}")
         logger.info("=" * 60)
-        
+
         if makers is None:
-            # get_all_makers メソッドの存在を確認
             if hasattr(self.scraper, 'get_all_makers'):
                 makers = self.scraper.get_all_makers()
             else:
-                # デフォルトのメーカーリストを使用
                 makers = [
                     'audi', 'bmw', 'mercedes-benz', 'volkswagen', 'toyota',
                     'honda', 'nissan', 'mazda', 'ford', 'tesla'
                 ]
                 logger.warning("Using default makers list")
-            
             exclude = ['editorial', 'leasing', 'news', 'reviews', 'deals', 'advice']
             makers = [m for m in makers if m not in exclude]
-        
+
         logger.info(f"Processing {len(makers)} makers")
-        
         for maker_idx, maker in enumerate(makers):
             logger.info(f"\n[{maker_idx + 1}/{len(makers)}] Processing: {maker}")
-            
             try:
                 models = self.scraper.get_models_for_maker(maker)
                 logger.info(f"  Found {len(models)} models")
-                
                 for model_idx, model_slug in enumerate(models):
                     if limit and self.stats['total'] >= limit:
                         logger.info("\nReached limit, stopping...")
                         self._print_statistics()
                         return
-                    
                     self.stats['total'] += 1
                     self._process_vehicle(model_slug, model_idx + 1, len(models))
                     time.sleep(0.5)
-                    
             except Exception as e:
                 logger.error(f"Error processing maker {maker}: {e}")
                 self.stats['errors'].append(f"Maker {maker}: {str(e)}")
-            
             finally:
                 if maker_idx % 10 == 0:
                     import gc
                     gc.collect()
-        
+
         self.scraper.cleanup()
         self._print_statistics()
-    
+
     def sync_specific(self, slugs: List[str]):
         """特定の車両のみ同期"""
         logger.info(f"Syncing {len(slugs)} specific vehicles")
-        
         for idx, slug in enumerate(slugs):
             self.stats['total'] += 1
             self._process_vehicle(slug, idx + 1, len(slugs))
             time.sleep(0.5)
-        
         self.scraper.cleanup()
         self._print_statistics()
-    
+
     def _process_vehicle(self, slug: str, current: int, total: int):
         """個別車両を処理"""
         try:
             logger.info(f"  [{current}/{total}] {slug}...")
-            
             raw_data = self.scraper.scrape_vehicle(slug)
-            
             if not raw_data:
                 logger.info(f"    NO DATA - marking as inactive")
                 self.supabase.mark_inactive(slug)
@@ -507,30 +496,27 @@ class SyncManager:
                 self.stats['inactive'] += 1
                 self.stats['skipped'] += 1
                 return
-            
+
             records = self.processor.process_vehicle_data(raw_data)
-            
             saved_count = 0
             for record in records:
                 supabase_success = self.supabase.upsert(record)
                 sheets_success = self.sheets.upsert(record)
-                
                 if supabase_success or sheets_success:
                     saved_count += 1
                     self.stats['records_saved'] += 1
-            
+
             if saved_count > 0:
                 logger.info(f"    OK ({saved_count}/{len(records)} records)")
                 self.stats['success'] += 1
             else:
                 logger.info(f"    FAILED")
                 self.stats['failed'] += 1
-                
         except Exception as e:
             logger.error(f"    ERROR: {e}")
             self.stats['failed'] += 1
             self.stats['errors'].append(f"{slug}: {str(e)}")
-    
+
     def _print_statistics(self):
         """統計情報を表示"""
         logger.info("\n" + "=" * 60)
@@ -542,12 +528,10 @@ class SyncManager:
         logger.info(f"Skipped: {self.stats['skipped']}")
         logger.info(f"Marked inactive: {self.stats['inactive']}")
         logger.info(f"Records saved: {self.stats['records_saved']}")
-        
         if self.stats['errors']:
             logger.info(f"\nErrors (first 10):")
             for error in self.stats['errors'][:10]:
                 logger.info(f"  - {error[:100]}")
-        
         if self.stats['total'] > 0:
             success_rate = (self.stats['success'] / self.stats['total']) * 100
             logger.info(f"\nSuccess rate: {success_rate:.1f}%")
@@ -562,40 +546,33 @@ def main():
     parser.add_argument('--no-supabase', action='store_true', help='Disable Supabase')
     parser.add_argument('--no-sheets', action='store_true', help='Disable Sheets')
     parser.add_argument('--no-deepl', action='store_true', help='Disable DeepL')
-    
     args = parser.parse_args()
-    
+
     if args.no_supabase:
         os.environ['SUPABASE_URL'] = ''
         os.environ['SUPABASE_KEY'] = ''
-    
     if args.no_sheets:
         os.environ['GS_CREDS_JSON'] = ''
         os.environ['GS_SHEET_ID'] = ''
-    
     if args.no_deepl:
         os.environ['DEEPL_KEY'] = ''
-    
     if args.test:
         args.limit = 5
         logger.info("Running in TEST mode (limit=5)")
-    
+
     manager = SyncManager()
-    
     if not manager.supabase.enabled and not manager.sheets.enabled:
         logger.error("No sync destination configured")
         sys.exit(1)
-    
+
     try:
         if args.models:
             manager.sync_specific(args.models)
         else:
             manager.sync_all(makers=args.makers, limit=args.limit)
-    
     except KeyboardInterrupt:
         logger.info("\nInterrupted by user")
         manager._print_statistics()
-    
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         import traceback
