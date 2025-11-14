@@ -233,33 +233,43 @@ jobs:
         tail -20 sync.log 2>/dev/null || echo "No log file available"
         # ここに失敗通知サービス（Slack、Discord等）への通知コードを追加可能
 
-- name: Heartbeat (prevent Supabase pause)
-  if: always()
-  env:
-    HB_ID: '1'
-    HB_SOURCE: 'carwow_sync'
-  run: |
-    set -euo pipefail
-    echo "=== Heartbeat Upsert ==="
-    ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    PAYLOAD='[{"id":'"$HB_ID"',"source":"'"$HB_SOURCE"'","last_run":"'"$ISO_NOW"'","ok":true}]'
+    - name: Heartbeat (prevent Supabase pause)
+      if: always()
+      env:
+        HB_ID: '1'
+        HB_SOURCE: 'carwow_sync'
+      run: |
+        set -euo pipefail
+        echo "=== Heartbeat Upsert ==="
+        ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        PAYLOAD='[{"id":'"$HB_ID"',"source":"'"$HB_SOURCE"'","last_run":"'"$ISO_NOW"'","ok":true}]'
 
-    attempt() {
-      echo "--- try $1 ---"
-      HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
-        -H "apikey: $SUPABASE_KEY" \
-        -H "Authorization: Bearer $SUPABASE_KEY" \
-        -H "Content-Type: application/json" \
-        -H "Prefer: resolution=merge-duplicates,return=minimal" \
-        -d "$PAYLOAD" || echo "000")
-      echo "HTTP $HTTP_CODE"
-      test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
-      [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]
-    }
+        HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
+          -H "apikey: $SUPABASE_KEY" \
+          -H "Authorization: Bearer $SUPABASE_KEY" \
+          -H "Content-Type: application/json" \
+          -H "Prefer: resolution=merge-duplicates,return=minimal" \
+          -d "$PAYLOAD" || echo "000")
+        echo "HTTP $HTTP_CODE"
+        test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
 
-    if attempt 1 || { sleep 3; attempt 2; }; then
-      echo "Heartbeat OK at $ISO_NOW"
-    else
-      echo "Heartbeat FAILED at $ISO_NOW"
-      exit 1
-    fi
+        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
+          echo "Heartbeat OK at $ISO_NOW"
+        else
+          echo "Heartbeat FAILED at $ISO_NOW"
+          sleep 3
+          # 1回だけリトライ
+          HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -d "$PAYLOAD" || echo "000")
+          echo "Retry HTTP $HTTP_CODE"
+          test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
+            echo "Heartbeat OK (retry) at $ISO_NOW"
+          else
+            exit 1
+          fi
+        fi
