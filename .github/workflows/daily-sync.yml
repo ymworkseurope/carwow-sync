@@ -14,14 +14,6 @@ on:
         description: 'Limit number of vehicles to process'
         required: false
         default: ''
-      full_sync:
-        description: 'Run full sync (all vehicles)'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 jobs:
   sync:
@@ -38,238 +30,232 @@ jobs:
       FALLBACK_EXCHANGE_RATE: ${{ secrets.FALLBACK_EXCHANGE_RATE || '185.0' }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Create cache files
-      run: |
-        touch body_type_cache.json
-        touch translation_cache.json
-        touch exchange_rate_cache.json
-        touch deepl_quota.json
-        touch sync.log
+      - name: Create cache files
+        run: |
+          touch body_type_cache.json
+          touch translation_cache.json
+          touch exchange_rate_cache.json
+          touch deepl_quota.json
+          touch sync.log
 
-    - name: Restore cache
-      uses: actions/cache@v3
-      with:
-        path: |
-          body_type_cache.json
-          translation_cache.json
-          exchange_rate_cache.json
-          deepl_quota.json
-        key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
-        restore-keys: |
-          carwow-cache-${{ runner.os }}-
+      - name: Restore cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            body_type_cache.json
+            translation_cache.json
+            exchange_rate_cache.json
+            deepl_quota.json
+          key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            carwow-cache-${{ runner.os }}-
 
-    - name: Prepare arguments
-      id: prepare
-      run: |
-        ARGS=""
+      - name: Prepare arguments
+        id: prepare
+        run: |
+          ARGS=""
 
-        # Limit（指定された場合のみ）
-        if [ -n "${{ github.event.inputs.limit }}" ]; then
-          ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
-        fi
-
-        # Makers（指定された場合のみ）
-        if [ -n "${{ github.event.inputs.makers }}" ]; then
-          ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
-        fi
-
-        # Full sync mode（デフォルトで有効）
-        if [ "${{ github.event.inputs.full_sync }}" != "false" ]; then
-          ARGS="$ARGS --full"
-        fi
-
-        echo "args=$ARGS" >> $GITHUB_OUTPUT
-        echo "Prepared arguments: $ARGS"
-
-    - name: Debug Environment
-      run: |
-        echo "=== Production Sync Configuration ==="
-        echo "GitHub Event: ${{ github.event_name }}"
-        echo "Full Sync: ${{ github.event.inputs.full_sync != 'false' && 'ENABLED' || 'DISABLED' }}"
-        echo "Makers: ${{ github.event.inputs.makers || 'ALL' }}"
-        echo "Limit: ${{ github.event.inputs.limit || 'NONE' }}"
-        echo "Timeout: 360 minutes (6 hours)"
-        echo ""
-        echo "Environment variables status:"
-        echo "SUPABASE_URL: ${{ env.SUPABASE_URL != '' && 'SET' || 'NOT SET' }}"
-        echo "SUPABASE_KEY: ${{ env.SUPABASE_KEY != '' && 'SET' || 'NOT SET' }}"
-        echo "GS_CREDS_JSON: ${{ env.GS_CREDS_JSON != '' && 'SET' || 'NOT SET' }}"
-        echo "GS_SHEET_ID: ${{ env.GS_SHEET_ID != '' && 'SET' || 'NOT SET' }}"
-        echo "DEEPL_KEY: ${{ env.DEEPL_KEY != '' && 'SET' || 'NOT SET' }}"
-        echo "FALLBACK_EXCHANGE_RATE: ${{ env.FALLBACK_EXCHANGE_RATE }}"
-
-    - name: Check files
-      run: |
-        echo "=== File System Check ==="
-        echo "Current directory: $(pwd)"
-        echo "Python files:"
-        ls -la *.py || echo "No Python files found"
-        echo "Cache files:"
-        ls -la *.json || echo "No JSON files found"
-        echo ""
-        echo "Python version: $(python --version)"
-        echo "Available disk space:"
-        df -h .
-        echo "Memory info:"
-        free -h
-
-    - name: Run production sync
-      run: |
-        echo "=== Starting Production Sync at $(date) ==="
-        echo "Arguments: ${{ steps.prepare.outputs.args }}"
-        echo ""
-
-        if [ -f "sync_manager.py" ]; then
-          # プロダクションモードで実行（--testフラグを削除）
-          python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log || {
-            echo ""
-            echo "=== SYNC FAILED with exit code: $? ==="
-            echo "=== Last 100 lines of sync.log ==="
-            tail -100 sync.log
-            echo ""
-            echo "=== Full log summary ==="
-            wc -l sync.log
-            echo ""
-            exit 1
-          }
-        else
-          echo "ERROR: sync_manager.py not found!"
-          echo "Available files:"
-          ls -la
-          exit 1
-        fi
-
-        echo ""
-        echo "=== Production Sync Completed Successfully at $(date) ==="
-        echo "=== Sync Statistics ==="
-        grep -i "processed\|completed\|total\|error\|success" sync.log | tail -20 || echo "No statistics found"
-
-    - name: Check sync results
-      if: always()
-      run: |
-        echo "=== Sync Results Analysis ==="
-        if [ -f "sync.log" ]; then
-          echo "Log file size: $(wc -l < sync.log) lines"
-          echo ""
-          echo "=== Error Summary ==="
-          grep -i "error\|failed\|exception" sync.log | tail -10 || echo "No errors found"
-          echo ""
-          echo "=== Success Summary ==="
-          grep -i "success\|completed\|processed" sync.log | tail -10 || echo "No success messages found"
-          echo ""
-          echo "=== Final Status ==="
-          tail -5 sync.log
-        else
-          echo "No sync.log file found"
-        fi
-
-        echo ""
-        echo "=== Cache File Status ==="
-        for file in body_type_cache.json translation_cache.json exchange_rate_cache.json deepl_quota.json; do
-          if [ -f "$file" ]; then
-            echo "$file: $(wc -c < "$file") bytes"
-          else
-            echo "$file: Not found"
+          # Limit（指定された場合のみ）
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit }}"
           fi
-        done
 
-    - name: Save cache
-      if: always()
-      uses: actions/cache@v3
-      with:
-        path: |
-          body_type_cache.json
-          translation_cache.json
-          exchange_rate_cache.json
-          deepl_quota.json
-        key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          # Makers（指定された場合のみ）
+          if [ -n "${{ github.event.inputs.makers }}" ]; then
+            ARGS="$ARGS --makers ${{ github.event.inputs.makers }}"
+          fi
 
-    - name: Upload comprehensive logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: production-sync-logs-${{ github.run_number }}
-        path: |
-          sync.log
-          body_type_cache.json
-          translation_cache.json
-          exchange_rate_cache.json
-          deepl_quota.json
-        retention-days: 30
-        if-no-files-found: warn
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+          echo "Prepared arguments: $ARGS"
 
-    - name: Send success notification
-      if: success()
-      run: |
-        echo "=== PRODUCTION SYNC SUCCESS ==="
-        echo "Sync completed successfully at $(date)"
-        echo "Run number: ${{ github.run_number }}"
-        echo "Total runtime: ${{ job.status }}"
-        # ここに成功通知サービス（Slack、Discord等）への通知コードを追加可能
+      - name: Debug Environment
+        run: |
+          echo "=== Production Sync Configuration ==="
+          echo "GitHub Event: ${{ github.event_name }}"
+          echo "Makers: ${{ github.event.inputs.makers || 'ALL' }}"
+          echo "Limit: ${{ github.event.inputs.limit || 'NONE' }}"
+          echo "Timeout: 360 minutes (6 hours)"
+          echo ""
+          echo "Environment variables status:"
+          echo "SUPABASE_URL: ${{ env.SUPABASE_URL != '' && 'SET' || 'NOT SET' }}"
+          echo "SUPABASE_KEY: ${{ env.SUPABASE_KEY != '' && 'SET' || 'NOT SET' }}"
+          echo "GS_CREDS_JSON: ${{ env.GS_CREDS_JSON != '' && 'SET' || 'NOT SET' }}"
+          echo "GS_SHEET_ID: ${{ env.GS_SHEET_ID != '' && 'SET' || 'NOT SET' }}"
+          echo "DEEPL_KEY: ${{ env.DEEPL_KEY != '' && 'SET' || 'NOT SET' }}"
+          echo "FALLBACK_EXCHANGE_RATE: ${{ env.FALLBACK_EXCHANGE_RATE }}"
 
-    - name: Send failure notification
-      if: failure()
-      run: |
-        echo "=== PRODUCTION SYNC FAILURE ==="
-        echo "Sync failed at $(date)"
-        echo "Run number: ${{ github.run_number }}"
-        echo "Check the uploaded artifacts for detailed logs"
-        echo ""
-        echo "=== Last 20 lines of log ==="
-        tail -20 sync.log 2>/dev/null || echo "No log file available"
-        # ここに失敗通知サービス（Slack、Discord等）への通知コードを追加可能
+      - name: Check files
+        run: |
+          echo "=== File System Check ==="
+          echo "Current directory: $(pwd)"
+          echo "Python files:"
+          ls -la *.py || echo "No Python files found"
+          echo "Cache files:"
+          ls -la *.json || echo "No JSON files found"
+          echo ""
+          echo "Python version: $(python --version)"
+          echo "Available disk space:"
+          df -h .
+          echo "Memory info:"
+          free -h
 
-    - name: Heartbeat (prevent Supabase pause)
-      if: always()
-      env:
-        HB_ID: '1'
-        HB_SOURCE: 'carwow_sync'
-      run: |
-        set -euo pipefail
-        echo "=== Heartbeat Upsert ==="
-        ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        PAYLOAD='[{"id":'"$HB_ID"',"source":"'"$HB_SOURCE"'","last_run":"'"$ISO_NOW"'","ok":true}]'
+      - name: Run production sync
+        run: |
+          echo "=== Starting Production Sync at $(date) ==="
+          echo "Arguments: ${{ steps.prepare.outputs.args }}"
+          echo ""
 
-        HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
-          -H "apikey: $SUPABASE_KEY" \
-          -H "Authorization: Bearer $SUPABASE_KEY" \
-          -H "Content-Type: application/json" \
-          -H "Prefer: resolution=merge-duplicates,return=minimal" \
-          -d "$PAYLOAD" || echo "000")
-        echo "HTTP $HTTP_CODE"
-        test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
+          if [ -f "sync_manager.py" ]; then
+            # プロダクションモードで実行
+            python sync_manager.py ${{ steps.prepare.outputs.args }} 2>&1 | tee sync.log || {
+              echo ""
+              echo "=== SYNC FAILED with exit code: $? ==="
+              echo "=== Last 100 lines of sync.log ==="
+              tail -100 sync.log
+              echo ""
+              echo "=== Full log summary ==="
+              wc -l sync.log
+              echo ""
+              exit 1
+            }
+          else
+            echo "ERROR: sync_manager.py not found!"
+            echo "Available files:"
+            ls -la
+            exit 1
+          fi
 
-        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
-          echo "Heartbeat OK at $ISO_NOW"
-        else
-          echo "Heartbeat FAILED at $ISO_NOW"
-          sleep 3
-          # 1回だけリトライ
+          echo ""
+          echo "=== Production Sync Completed Successfully at $(date) ==="
+          echo "=== Sync Statistics ==="
+          grep -i "processed\|completed\|total\|error\|success" sync.log | tail -20 || echo "No statistics found"
+
+      - name: Check sync results
+        if: always()
+        run: |
+          echo "=== Sync Results Analysis ==="
+          if [ -f "sync.log" ]; then
+            echo "Log file size: $(wc -l < sync.log) lines"
+            echo ""
+            echo "=== Error Summary ==="
+            grep -i "error\|failed\|exception" sync.log | tail -10 || echo "No errors found"
+            echo ""
+            echo "=== Success Summary ==="
+            grep -i "success\|completed\|processed" sync.log | tail -10 || echo "No success messages found"
+            echo ""
+            echo "=== Final Status ==="
+            tail -5 sync.log
+          else
+            echo "No sync.log file found"
+          fi
+
+          echo ""
+          echo "=== Cache File Status ==="
+          for file in body_type_cache.json translation_cache.json exchange_rate_cache.json deepl_quota.json; do
+            if [ -f "$file" ]; then
+              echo "$file: $(wc -c < "$file") bytes"
+            else
+              echo "$file: Not found"
+            fi
+          done
+
+      - name: Save cache
+        if: always()
+        uses: actions/cache@v3
+        with:
+          path: |
+            body_type_cache.json
+            translation_cache.json
+            exchange_rate_cache.json
+            deepl_quota.json
+          key: carwow-cache-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+
+      - name: Upload comprehensive logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-sync-logs-${{ github.run_number }}
+          path: |
+            sync.log
+            body_type_cache.json
+            translation_cache.json
+            exchange_rate_cache.json
+            deepl_quota.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Send success notification
+        if: success()
+        run: |
+          echo "=== PRODUCTION SYNC SUCCESS ==="
+          echo "Sync completed successfully at $(date)"
+          echo "Run number: ${{ github.run_number }}"
+          echo "Total runtime: ${{ job.status }}"
+          # ここに成功通知サービス（Slack、Discord等）への通知コードを追加可能
+
+      - name: Send failure notification
+        if: failure()
+        run: |
+          echo "=== PRODUCTION SYNC FAILURE ==="
+          echo "Sync failed at $(date)"
+          echo "Run number: ${{ github.run_number }}"
+          echo "Check the uploaded artifacts for detailed logs"
+          echo ""
+          echo "=== Last 20 lines of log ==="
+          tail -20 sync.log 2>/dev/null || echo "No log file available"
+          # ここに失敗通知サービス（Slack、Discord等）への通知コードを追加可能
+
+      - name: Heartbeat (prevent Supabase pause)
+        if: always()
+        env:
+          HB_ID: '1'
+          HB_SOURCE: 'carwow_sync'
+        run: |
+          set -euo pipefail
+          echo "=== Heartbeat Upsert ==="
+          ISO_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          PAYLOAD='[{"id":'"$HB_ID"',"source":"'"$HB_SOURCE"'","last_run":"'"$ISO_NOW"'","ok":true}]'
+
           HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
             -H "apikey: $SUPABASE_KEY" \
             -H "Authorization: Bearer $SUPABASE_KEY" \
             -H "Content-Type: application/json" \
             -H "Prefer: resolution=merge-duplicates,return=minimal" \
             -d "$PAYLOAD" || echo "000")
-          echo "Retry HTTP $HTTP_CODE"
+          echo "HTTP $HTTP_CODE"
           test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
+
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
-            echo "Heartbeat OK (retry) at $ISO_NOW"
+            echo "Heartbeat OK at $ISO_NOW"
           else
-            exit 1
+            echo "Heartbeat FAILED at $ISO_NOW"
+            sleep 3
+            # 1回だけリトライ
+            HTTP_CODE=$(curl -sS -o /tmp/hb.out -w "%{http_code}" -X POST "$SUPABASE_URL/rest/v1/heartbeat?on_conflict=id" \
+              -H "apikey: $SUPABASE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: resolution=merge-duplicates,return=minimal" \
+              -d "$PAYLOAD" || echo "000")
+            echo "Retry HTTP $HTTP_CODE"
+            test -s /tmp/hb.out && tail -c 400 /tmp/hb.out || true
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "204" ]; then
+              echo "Heartbeat OK (retry) at $ISO_NOW"
+            else
+              exit 1
+            fi
           fi
-        fi
